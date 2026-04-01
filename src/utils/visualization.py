@@ -13,7 +13,7 @@ def plot_pseudospectrum_background(
     epsilon: float,
     ax,
     resolution: int = 100,
-    alpha: float = 0.3,
+    alpha: float = 0.18,
     padding: float = 0.2,
 ):
     """Draw a background contour for sigma_min(zI - A) = epsilon."""
@@ -48,9 +48,9 @@ def plot_pseudospectrum_background(
         yy,
         sigma_min,
         levels=[epsilon],
-        colors="gray",
+        colors="0.55",
         linestyles="dashed",
-        linewidths=1.2,
+        linewidths=1.0,
         alpha=alpha,
     )
 
@@ -77,23 +77,31 @@ def plot_trajectory(
         plot_pseudospectrum_background(A, epsilon, ax, resolution=100)
 
     if step_sizes is not None and len(step_sizes) == len(traj_array) - 1:
+        ax.plot(
+            np.real(traj_array),
+            np.imag(traj_array),
+            color="tab:blue",
+            linewidth=2.6,
+            alpha=0.95,
+            zorder=4,
+            label="Tracked Contour",
+        )
         scatter = ax.scatter(
             np.real(traj_array[:-1]),
             np.imag(traj_array[:-1]),
             c=np.asarray(step_sizes, dtype=np.float64),
             cmap="viridis",
-            s=28,
+            s=18,
             edgecolors="none",
-            zorder=3,
-            label="Trajectory",
+            zorder=5,
+            label="Step Size",
         )
         plt.colorbar(scatter, ax=ax, label="Step size")
-        ax.plot(np.real(traj_array), np.imag(traj_array), color="0.55", linewidth=0.8, alpha=0.5, zorder=2)
     else:
-        ax.plot(np.real(traj_array), np.imag(traj_array), color="tab:blue", linewidth=1.5, alpha=0.8, label="Trajectory")
+        ax.plot(np.real(traj_array), np.imag(traj_array), color="tab:blue", linewidth=2.6, alpha=0.95, label="Tracked Contour", zorder=4)
 
-    ax.scatter(np.real(traj_array[0]), np.imag(traj_array[0]), c="green", s=90, marker="o", label="Start", zorder=5)
-    ax.scatter(np.real(traj_array[-1]), np.imag(traj_array[-1]), c="red", s=70, marker="s", label="End", zorder=5)
+    ax.scatter(np.real(traj_array[0]), np.imag(traj_array[0]), c="green", s=110, marker="o", label="Start", zorder=6, edgecolors="black", linewidths=0.5)
+    ax.scatter(np.real(traj_array[-1]), np.imag(traj_array[-1]), c="red", s=90, marker="s", label="End", zorder=6, edgecolors="black", linewidths=0.5)
 
     if restart_indices:
         clipped = [idx for idx in restart_indices if 0 <= idx < len(traj_array)]
@@ -103,11 +111,11 @@ def plot_trajectory(
                 np.real(restart_points),
                 np.imag(restart_points),
                 c="orange",
-                s=90,
+                s=110,
                 marker="x",
                 linewidths=2,
                 label="SVD Restart",
-                zorder=6,
+                zorder=7,
             )
 
     ax.set_xlabel("Re(z)")

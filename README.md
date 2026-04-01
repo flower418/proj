@@ -39,8 +39,7 @@ python scripts/run_tracking.py \
     --matrix-path path/to/matrix.npy \
     --checkpoint models/my_model/best_model.pt \
     --plot-out results/trajectory.png \
-    --z0-real 0.5 \
-    --z0-imag 0.2
+    --epsilon 0.1
 ```
 
 详细教程请查看：**[SERVER_TUTORIAL.md](SERVER_TUTORIAL.md)**
@@ -195,6 +194,12 @@ pytest tests/ -v
 然后沿着该矩阵的 `epsilon`-伪谱等高线追踪并闭合出完整轮廓。
 
 它不是“仅凭几个点直接补全轮廓”的黑盒插值器。控制器学的是追踪过程中的步长与重启策略，不替代矩阵本身的伪谱定义。
+
+补充说明：
+- 一次运行只追踪一条连通等高线分量，不会一次性把所有分量全画完。
+- 追踪哪一条分量，由起点 `z0` 决定。
+- 如果你不显式提供 `z0`，`run_tracking.py` 会自动选择一个起点：默认取最右侧特征值对应分量的边界点。
+- `z0-real` 和 `z0-imag` 组成复数 `z0 = z0_real + i z0_imag`，它表示复平面上的一个初始猜测点，不要求你正好落在等高线上；脚本会先把它投影到 `sigma_min(zI-A)=epsilon` 的真实边界上。
 
 ---
 

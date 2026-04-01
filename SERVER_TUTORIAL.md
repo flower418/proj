@@ -89,10 +89,9 @@ python src/data/dataset.py --data-dir data/prod_50k
 
 **预期输出**：
 ```
-Train: 40,000 samples (80%)
-Val: 5,000 samples (10%)
-Test: 5,000 samples (10%)
-重启样本：4,000 (8.0%)
+总样本会接近目标值，但不保证精确等于目标值
+Train / Val / Test 会按实际总样本自动做约 80% / 10% / 10% 划分
+重启样本比例依数据生成结果而变化，不应在教程里写死
 ```
 
 ---
@@ -151,9 +150,8 @@ python scripts/run_tracking.py \
     --matrix-path path/to/matrix.npy \
     --checkpoint models/my_model/best_model.pt \
     --plot-out results/my_trajectory.png \
-    --max-steps 100 \
-    --z0-real 0.5 \
-    --z0-imag 0.2
+    --epsilon 0.1 \
+    --max-steps 100
 ```
 
 **输出**：`results/my_trajectory.png` (轨迹图)
@@ -161,6 +159,9 @@ python scripts/run_tracking.py \
 说明：
 - `run_tracking.py` 追踪的是“给定矩阵 A、给定边界起点 z0”对应的完整伪谱等高线。
 - 如果不提供 `--matrix-path`，脚本只能进入 `--demo-random` 演示模式，这不是正式实验模式。
+- `--epsilon` 明确指定追踪哪一条 `sigma_min(zI-A)=epsilon` 等高线；不传时才回退到 `configs/default.yaml` 里的值。
+- 一次运行只追踪一个连通分量。默认自动起点 `--auto-start rightmost` 会选择最右侧特征值附近那条分量。
+- 如果你想指定分量，可以显式给 `--z0-real` 和 `--z0-imag`；两者组成复数初值 `z0`，脚本会先把这个猜测点投影到真实等高线上再开始追踪。
 
 ### 4.2 评估模型性能
 
@@ -245,8 +246,7 @@ python scripts/run_tracking.py \
     --matrix-size 20 \
     --checkpoint models/quick/best_model.pt \
     --plot-out results/quick.png \
-    --z0-real 0.5 \
-    --z0-imag 0.2
+    --epsilon 0.1
 ```
 
 ### 生产流程（6 小时）
@@ -277,8 +277,7 @@ python scripts/run_tracking.py \
     --matrix-path path/to/matrix.npy \
     --checkpoint models/prod/best_model.pt \
     --plot-out results/prod.png \
-    --z0-real 0.5 \
-    --z0-imag 0.2
+    --epsilon 0.1
 ```
 
 ---
@@ -316,7 +315,7 @@ proj/
 | 生成数据 | `python scripts/generate_large_dataset.py --target-samples 50000 --output-dir data/my_data` |
 | 检查数据 | `python src/data/dataset.py --data-dir data/my_data` |
 | 训练 | `python scripts/train_from_dataset.py --data-dir data/my_data --experiment-name my_model` |
-| 推理 | `python scripts/run_tracking.py --matrix-path path/to/matrix.npy --checkpoint models/my_model/best_model.pt --plot-out results/out.png --z0-real 0.5 --z0-imag 0.2` |
+| 推理 | `python scripts/run_tracking.py --matrix-path path/to/matrix.npy --checkpoint models/my_model/best_model.pt --plot-out results/out.png --epsilon 0.1` |
 | 评估 | `python scripts/evaluate.py --checkpoint models/my_model/best_model.pt --data-dir data/my_data` |
 | 训练总图 | `logs/<experiment>/training_summary.png` |
 

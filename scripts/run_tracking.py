@@ -14,6 +14,7 @@ from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.nn.controller import NNController
 from src.utils.config import load_yaml_config
+from src.utils.contour_init import auto_select_contour_start, project_to_contour, sigma_min_at
 from src.utils.visualization import plot_trajectory
 
 
@@ -28,8 +29,21 @@ def parse_args():
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--plot-out", default=None)
     parser.add_argument("--result-out", default=None, help="Optional .json summary output.")
-    parser.add_argument("--z0-real", type=float, default=0.5)
-    parser.add_argument("--z0-imag", type=float, default=0.2)
+    parser.add_argument("--epsilon", type=float, default=None, help="Override the epsilon level from config.")
+    parser.add_argument("--z0-real", type=float, default=None, help="Real part of a user-supplied initial guess in the complex plane.")
+    parser.add_argument("--z0-imag", type=float, default=None, help="Imag part of a user-supplied initial guess in the complex plane.")
+    parser.add_argument(
+        "--auto-start",
+        choices=["rightmost", "leftmost", "topmost", "bottommost"],
+        default="rightmost",
+        help="Automatically choose a start point from the contour component around an extreme eigenvalue.",
+    )
+    parser.add_argument(
+        "--auto-angle-offset",
+        type=float,
+        default=0.0,
+        help="Rotate the automatic start ray by this many radians.",
+    )
     return parser.parse_args()
 
 
@@ -50,6 +64,7 @@ def load_matrix(matrix_path: str) -> np.ndarray:
 def main():
     args = parse_args()
     config = load_yaml_config(args.config)
+    epsilon = float(args.epsilon if args.epsilon is not None else config["ode"]["epsilon"])
     if args.matrix_path is None and not args.demo_random:
         raise ValueError("Provide --matrix-path for real inference, or use --demo-random for a toy random-matrix demo.")
     np.random.seed(args.seed)
@@ -57,6 +72,26 @@ def main():
         A = np.asarray(load_matrix(args.matrix_path), dtype=np.complex128)
     else:
         A = np.random.randn(args.matrix_size, args.matrix_size) + 1j * np.random.randn(args.matrix_size, args.matrix_size)
+
+    start_mode = "auto"
+    anchor_eigenvalue = None
+    z_input = None
+    sigma_at_input = None
+    if args.z0_real is not None or args.z0_imag is not None:
+        if args.z0_real is None or args.z0_imag is None:
+            raise ValueError("Provide both --z0-real and --z0-imag, or provide neither and use automatic start selection.")
+        start_mode = "user_guess"
+        z_input = complex(args.z0_real, args.z0_imag)
+        sigma_at_input = sigma_min_at(A, z_input)
+        z0, sigma_at_start = project_to_contour(A, epsilon, z_input)
+    else:
+        z0, sigma_at_start, anchor_eigenvalue = auto_select_contour_start(
+            A,
+            epsilon,
+            which=args.auto_start,
+            angle_offset=args.auto_angle_offset,
+        )
+
     solver = PseudoinverseSolver(
         method=config["solver"]["method"],
         tol=config["solver"]["tol"],
@@ -74,16 +109,16 @@ def main():
         checkpoint = torch.load(args.checkpoint, map_location="cpu")
         controller.load_state_dict(checkpoint["model_state_dict"])
         controller.eval()
-    ode = ManifoldODE(A, epsilon=config["ode"]["epsilon"], solver=solver)
+    ode = ManifoldODE(A, epsilon=epsilon, solver=solver)
     tracker = ContourTracker(
         A=A,
-        epsilon=config["ode"]["epsilon"],
+        epsilon=epsilon,
         ode_system=ode,
         controller=controller,
         fixed_step_size=config["ode"]["initial_step_size"],
         closure_tol=config["tracker"]["closure_tol"],
     )
-    result = tracker.track(z0=complex(args.z0_real, args.z0_imag), max_steps=args.max_steps)
+    result = tracker.track(z0=z0, max_steps=args.max_steps)
     closure_error = float(np.abs(result["trajectory"][-1] - result["trajectory"][0]))
     if args.plot_out is not None:
         plot_path = Path(args.plot_out)
@@ -93,16 +128,24 @@ def main():
             restart_indices=result["restart_indices"],
             step_sizes=result["step_sizes"],
             A=A,
-            epsilon=config["ode"]["epsilon"],
-            title=f"Contour Tracking from z0={complex(args.z0_real, args.z0_imag)}",
+            epsilon=epsilon,
+            title=f"Contour Tracking (epsilon={epsilon:.4g}, start={start_mode}, z0={z0:.4f})",
             save_path=str(plot_path),
         )
     summary = {
         "tracked_points": int(len(result["trajectory"])),
         "num_restarts": int(len(result["restart_indices"])),
         "closure_error": closure_error,
-        "start_point": [float(np.real(result["trajectory"][0])), float(np.imag(result["trajectory"][0]))],
+        "epsilon": epsilon,
+        "start_mode": start_mode,
+        "input_point": None if z_input is None else [float(np.real(z_input)), float(np.imag(z_input))],
+        "projected_start_point": [float(np.real(result["trajectory"][0])), float(np.imag(result["trajectory"][0]))],
         "end_point": [float(np.real(result["trajectory"][-1])), float(np.imag(result["trajectory"][-1]))],
+        "sigma_at_input": sigma_at_input,
+        "sigma_at_projected_start": sigma_at_start,
+        "anchor_eigenvalue": None if anchor_eigenvalue is None else [float(np.real(anchor_eigenvalue)), float(np.imag(anchor_eigenvalue))],
+        "auto_start_mode": args.auto_start if start_mode == "auto" else None,
+        "auto_angle_offset": args.auto_angle_offset if start_mode == "auto" else None,
         "mode": "user_matrix" if args.matrix_path is not None else "demo_random",
     }
     if args.result_out is not None:
