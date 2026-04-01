@@ -93,7 +93,7 @@ class ContourTracker:
             return False
         return True
 
-    def track(self, z0: complex, max_steps: int = 1000) -> Dict:
+    def track(self, z0: complex, max_steps: int = 1000, step_callback=None) -> Dict:
         u, v = self.initialize(z0)
         state = TrackerState(z=z0, u=u, v=v, prev_gamma_arg=None)
         trajectory = [z0]
@@ -114,13 +114,19 @@ class ContourTracker:
             features = self.extract_state_features(state.z, state.u, state.v, prev_state=state)
             feature_history.append(features)
             if self.controller is not None:
-                ds, need_restart = self.controller.predict(features)
+                if hasattr(self.controller, "predict_with_info"):
+                    ds, need_restart, controller_info = self.controller.predict_with_info(features)
+                else:
+                    ds, need_restart = self.controller.predict(features)
+                    controller_info = {}
             else:
                 ds = self.fixed_step_size
                 need_restart = False
+                controller_info = {}
             ds = max(float(ds), 1e-12)
 
-            if need_restart and steps_since_restart >= self.min_steps_between_restarts:
+            applied_restart = bool(need_restart and steps_since_restart >= self.min_steps_between_restarts)
+            if applied_restart:
                 _, u_step, v_step = self.exact_svd_restart(state.z)
                 restart_indices.append(len(trajectory) - 1)
                 steps_since_restart = 0
@@ -156,6 +162,25 @@ class ContourTracker:
             v_history.append(v.copy())
             step_sizes.append(float(ds))
             steps_since_restart += 1
+
+            if step_callback is not None:
+                step_callback(
+                    {
+                        "step": step,
+                        "z_prev": state.z,
+                        "z_next": z,
+                        "ds": float(ds),
+                        "need_restart": bool(need_restart),
+                        "applied_restart": applied_restart,
+                        "step_distance": step_distance,
+                        "distance_to_start": float(np.abs(z - z0)),
+                        "path_length": float(path_length),
+                        "max_distance_from_start": float(max_distance_from_start),
+                        "winding_angle": float(winding_angle),
+                        "controller_info": controller_info,
+                        "features": features.copy(),
+                    }
+                )
 
             if self.check_closure(
                 z,

@@ -52,11 +52,17 @@ class NNController(nn.Module):
         return ds, p_restart
 
     @torch.no_grad()
-    def predict(self, state_np: np.ndarray) -> Tuple[float, bool]:
+    def predict_with_info(self, state_np: np.ndarray) -> Tuple[float, bool, dict]:
         self.eval()
         device = next(self.parameters()).device
         x = torch.as_tensor(state_np, dtype=torch.float32, device=device).unsqueeze(0)
         ds, p_restart = self.forward(x)
         ds_value = float(ds.squeeze(0).item())
-        need_restart = bool(p_restart.squeeze(0).item() > 0.5)
+        restart_prob = float(p_restart.squeeze(0).item())
+        need_restart = bool(restart_prob > 0.5)
+        return ds_value, need_restart, {"restart_prob": restart_prob}
+
+    @torch.no_grad()
+    def predict(self, state_np: np.ndarray) -> Tuple[float, bool]:
+        ds_value, need_restart, _ = self.predict_with_info(state_np)
         return ds_value, need_restart

@@ -29,7 +29,7 @@ def parse_args():
     parser.add_argument("--matrix-type", choices=["complex", "real", "hermitian"], default="complex")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=200)
-    parser.add_argument("--max-attempts", type=int, default=8, help="Retry with new random matrix/start until a closed contour is found.")
+    parser.add_argument("--max-attempts", type=int, default=32, help="Retry with new random matrix/start until a closed contour is found.")
     parser.add_argument(
         "--sample-mode",
         choices=["trained_epsilon", "point_sigma"],
@@ -50,6 +50,8 @@ def parse_args():
         metavar=("R_MIN", "R_MAX"),
         help="Random radius range as a fraction of spectral scale around a random eigenvalue.",
     )
+    parser.add_argument("--print-every", type=int, default=1, help="Print NN decisions every k tracking steps.")
+    parser.add_argument("--quiet", action="store_true", help="Disable step-by-step console diagnostics.")
     return parser.parse_args()
 
 
@@ -86,6 +88,17 @@ class DemoController:
         ds, need_restart = self.base_controller.predict(state_np)
         return max(float(ds), self.min_step_size), bool(need_restart)
 
+    def predict_with_info(self, state_np: np.ndarray) -> tuple[float, bool, dict]:
+        if hasattr(self.base_controller, "predict_with_info"):
+            ds, need_restart, info = self.base_controller.predict_with_info(state_np)
+        else:
+            ds, need_restart = self.base_controller.predict(state_np)
+            info = {}
+        ds = max(float(ds), self.min_step_size)
+        info = dict(info)
+        info["min_step_size_applied"] = self.min_step_size
+        return ds, bool(need_restart), info
+
 
 def load_controller(checkpoint_path: str, config: dict) -> NNController:
     controller = NNController(
@@ -99,6 +112,33 @@ def load_controller(checkpoint_path: str, config: dict) -> NNController:
     controller.load_state_dict(checkpoint["model_state_dict"])
     controller.eval()
     return controller
+
+
+def _format_complex(z: complex) -> str:
+    return f"{float(np.real(z)):+.5f}{float(np.imag(z)):+.5f}j"
+
+
+def make_step_printer(print_every: int):
+    def _printer(info: dict) -> None:
+        step = int(info["step"])
+        if print_every > 1 and (step % print_every != 0):
+            return
+        restart_prob = info.get("controller_info", {}).get("restart_prob")
+        restart_prob_str = "None" if restart_prob is None else f"{restart_prob:.4f}"
+        print(
+            f"  step={step:04d} "
+            f"ds={info['ds']:.6f} "
+            f"p_restart={restart_prob_str} "
+            f"need_restart={int(info['need_restart'])} "
+            f"applied_restart={int(info['applied_restart'])} "
+            f"|dz|={info['step_distance']:.6f} "
+            f"|z-z0|={info['distance_to_start']:.6f} "
+            f"path={info['path_length']:.6f} "
+            f"wind={info['winding_angle']:.4f} "
+            f"z={_format_complex(info['z_next'])}"
+        )
+
+    return _printer
 
 
 def main():
@@ -146,10 +186,32 @@ def main():
             closure_tol=config["tracker"]["closure_tol"],
             min_steps_between_restarts=5,
         )
+        if not args.quiet:
+            print(
+                f"attempt={attempt_idx + 1}/{args.max_attempts} "
+                f"epsilon={epsilon:.6f} "
+                f"z0={_format_complex(z0)} "
+                f"anchor={_format_complex(anchor)}"
+            )
         best_local = None
         for multiplier in budget_multipliers:
             step_budget = int(max(args.max_steps * multiplier, 64))
-            result = tracker.track(z0=z0, max_steps=step_budget)
+            if not args.quiet:
+                print(f"  step_budget={step_budget}")
+            result = tracker.track(
+                z0=z0,
+                max_steps=step_budget,
+                step_callback=None if args.quiet else make_step_printer(max(args.print_every, 1)),
+            )
+            if not args.quiet:
+                print(
+                    f"  summary closed={int(result['closed'])} "
+                    f"points={len(result['trajectory'])} "
+                    f"restarts={len(result['restart_indices'])} "
+                    f"closure_error={float(np.abs(result['trajectory'][-1] - result['trajectory'][0])):.6f} "
+                    f"path={result['path_length']:.6f} "
+                    f"wind={result['winding_angle']:.4f}"
+                )
             local_attempt = {
                 "attempt_index": attempt_idx,
                 "step_budget": step_budget,
@@ -202,6 +264,18 @@ def main():
             break
 
     if best_attempt is None or not best_attempt["result"]["closed"]:
+        if best_attempt is not None and not args.quiet:
+            best_result = best_attempt["result"]
+            print(
+                f"best_attempt_so_far attempt={best_attempt['attempt_index'] + 1} "
+                f"step_budget={best_attempt['step_budget']} "
+                f"closed={int(best_result['closed'])} "
+                f"points={len(best_result['trajectory'])} "
+                f"restarts={len(best_result['restart_indices'])} "
+                f"closure_error={float(np.abs(best_result['trajectory'][-1] - best_result['trajectory'][0])):.6f} "
+                f"path={best_result['path_length']:.6f} "
+                f"wind={best_result['winding_angle']:.4f}"
+            )
         raise RuntimeError(
             f"Failed to obtain a closed contour after {args.max_attempts} attempts. "
             "Increase --max-attempts or inspect the controller predictions."
