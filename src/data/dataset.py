@@ -8,6 +8,46 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 
+def ensure_dataset_splits(
+    data_dir: str | Path,
+    total_samples: int | None = None,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    seed: int = 0,
+):
+    """Ensure dataset_splits.npz exists; create a default split if missing."""
+    data_path = Path(data_dir)
+    splits_path = data_path / "dataset_splits.npz"
+    if splits_path.exists():
+        return np.load(splits_path)
+
+    if total_samples is None:
+        data = np.load(data_path / "dataset_full.npz")
+        total_samples = int(data["features"].shape[0])
+
+    rng = np.random.default_rng(seed)
+    indices = np.arange(total_samples, dtype=np.int64)
+    rng.shuffle(indices)
+
+    train_end = int(train_ratio * total_samples)
+    val_end = train_end + int(val_ratio * total_samples)
+    train_indices = indices[:train_end]
+    val_indices = indices[train_end:val_end]
+    test_indices = indices[val_end:]
+
+    np.savez(
+        splits_path,
+        train_indices=train_indices,
+        val_indices=val_indices,
+        test_indices=test_indices,
+    )
+    return {
+        "train_indices": train_indices,
+        "val_indices": val_indices,
+        "test_indices": test_indices,
+    }
+
+
 class PseudospectrumDataset(Dataset):
     """伪谱数据集"""
 
@@ -20,7 +60,7 @@ class PseudospectrumDataset(Dataset):
 
         # 加载数据
         data = np.load(data_path / "dataset_full.npz")
-        splits = np.load(data_path / "dataset_splits.npz")
+        splits = ensure_dataset_splits(data_path, total_samples=int(data["features"].shape[0]))
 
         self.features = data["features"]
         self.ds_expert = data["ds_expert"]
@@ -78,8 +118,15 @@ def analyze_dataset(data_dir: str):
         print(f"\n总样本：{stats['total_samples']:,}")
         print(f"重启样本：{stats['restart_samples']:,} ({100*stats['restart_samples']/stats['total_samples']:.2f}%)")
 
-    # 加载划分
-    splits = np.load(data_path / "dataset_splits.npz")
+    data = np.load(data_path / "dataset_full.npz")
+    total_samples = int(data["features"].shape[0])
+    restart_samples = int(np.sum(data["y_restart"]))
+    if not stats_file.exists():
+        print(f"\n总样本：{total_samples:,}")
+        print(f"重启样本：{restart_samples:,} ({100*restart_samples/max(total_samples, 1):.2f}%)")
+
+    # 加载或自动创建划分
+    splits = ensure_dataset_splits(data_path, total_samples=total_samples)
     print(f"\nTrain: {len(splits['train_indices']):,}")
     print(f"Val: {len(splits['val_indices']):,}")
     print(f"Test: {len(splits['test_indices']):,}")
