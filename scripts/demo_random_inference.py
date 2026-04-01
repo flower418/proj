@@ -28,7 +28,8 @@ def parse_args():
     parser.add_argument("--matrix-size", type=int, default=20)
     parser.add_argument("--matrix-type", choices=["complex", "real", "hermitian"], default="complex")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-steps", type=int, default=200)
+    parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--max-attempts", type=int, default=8, help="Retry with new random matrix/start until a closed contour is found.")
     parser.add_argument(
         "--radius-range",
         type=float,
@@ -89,28 +90,69 @@ def main():
     plot_out = output_dir / "tracked_contour.png"
     result_out = output_dir / "tracking_summary.json"
 
-    A = generate_random_matrix(args.matrix_size, args.matrix_type, rng).astype(np.complex128)
-    np.save(matrix_out, A)
-
-    z0, anchor = choose_random_start(A, rng, tuple(args.radius_range))
-    epsilon = sigma_min_at(A, z0)
-
     solver = PseudoinverseSolver(
         method=config["solver"]["method"],
         tol=config["solver"]["tol"],
         max_iter=config["solver"]["max_iter"],
     )
     controller = load_controller(args.checkpoint, config)
-    ode = ManifoldODE(A, epsilon=epsilon, solver=solver)
-    tracker = ContourTracker(
-        A=A,
-        epsilon=epsilon,
-        ode_system=ode,
-        controller=controller,
-        fixed_step_size=config["ode"]["initial_step_size"],
-        closure_tol=config["tracker"]["closure_tol"],
-    )
-    result = tracker.track(z0=z0, max_steps=args.max_steps)
+
+    best_attempt = None
+    for attempt_idx in range(args.max_attempts):
+        A = generate_random_matrix(args.matrix_size, args.matrix_type, rng).astype(np.complex128)
+        z0, anchor = choose_random_start(A, rng, tuple(args.radius_range))
+        epsilon = sigma_min_at(A, z0)
+        ode = ManifoldODE(A, epsilon=epsilon, solver=solver)
+        tracker = ContourTracker(
+            A=A,
+            epsilon=epsilon,
+            ode_system=ode,
+            controller=controller,
+            fixed_step_size=config["ode"]["initial_step_size"],
+            closure_tol=config["tracker"]["closure_tol"],
+        )
+        result = tracker.track(z0=z0, max_steps=args.max_steps)
+        attempt = {
+            "attempt_index": attempt_idx,
+            "A": A,
+            "z0": z0,
+            "anchor": anchor,
+            "epsilon": epsilon,
+            "result": result,
+        }
+        if best_attempt is None:
+            best_attempt = attempt
+        else:
+            best_score = (
+                int(bool(best_attempt["result"]["closed"])),
+                abs(float(best_attempt["result"]["winding_angle"])),
+                float(best_attempt["result"]["path_length"]),
+                -float(best_attempt["result"]["closure_error"]) if "closure_error" in best_attempt["result"] else 0.0,
+            )
+            current_score = (
+                int(bool(result["closed"])),
+                abs(float(result["winding_angle"])),
+                float(result["path_length"]),
+                -float(np.abs(result["trajectory"][-1] - result["trajectory"][0])),
+            )
+            if current_score > best_score:
+                best_attempt = attempt
+        if result["closed"]:
+            best_attempt = attempt
+            break
+
+    if best_attempt is None or not best_attempt["result"]["closed"]:
+        raise RuntimeError(
+            f"Failed to obtain a closed contour after {args.max_attempts} attempts. "
+            "Increase --max-attempts or inspect the controller predictions."
+        )
+
+    A = best_attempt["A"]
+    z0 = best_attempt["z0"]
+    anchor = best_attempt["anchor"]
+    epsilon = float(best_attempt["epsilon"])
+    result = best_attempt["result"]
+    np.save(matrix_out, A)
 
     plot_trajectory(
         trajectory=result["trajectory"],
@@ -129,12 +171,18 @@ def main():
         "matrix_size": args.matrix_size,
         "matrix_type": args.matrix_type,
         "seed": args.seed,
+        "attempt_index": int(best_attempt["attempt_index"]),
+        "max_attempts": int(args.max_attempts),
         "epsilon": float(epsilon),
         "z0": [float(np.real(z0)), float(np.imag(z0))],
         "anchor_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
         "tracked_points": int(len(result["trajectory"])),
         "num_restarts": int(len(result["restart_indices"])),
         "closure_error": float(np.abs(result["trajectory"][-1] - result["trajectory"][0])),
+        "closed": bool(result["closed"]),
+        "path_length": float(result["path_length"]),
+        "max_distance_from_start": float(result["max_distance_from_start"]),
+        "winding_angle": float(result["winding_angle"]),
     }
 
     with result_out.open("w", encoding="utf-8") as fh:

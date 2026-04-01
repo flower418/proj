@@ -17,9 +17,30 @@ def test_tracker_runs_without_controller():
 def test_closure_detection():
     np.random.seed(2)
     A = np.random.randn(6, 6) + 1j * np.random.randn(6, 6)
-    tracker = ContourTracker(A=A, epsilon=0.1, ode_system=ManifoldODE(A, 0.1), closure_tol=1e-2)
-    assert tracker.check_closure(0.1 + 0.1j, 0.1005 + 0.1005j, current_step=12)
+    tracker = ContourTracker(
+        A=A,
+        epsilon=0.1,
+        ode_system=ManifoldODE(A, 0.1),
+        closure_tol=1e-2,
+        min_steps_before_closure=10,
+    )
+    assert tracker.check_closure(
+        0.1 + 0.1j,
+        0.1005 + 0.1005j,
+        current_step=12,
+        path_length=0.5,
+        max_distance_from_start=0.2,
+        winding_angle=1.8 * np.pi,
+    )
     assert not tracker.check_closure(0.1 + 0.1j, 0.1005 + 0.1005j, current_step=3)
+    assert not tracker.check_closure(
+        0.1 + 0.1j,
+        0.1005 + 0.1005j,
+        current_step=12,
+        path_length=0.01,
+        max_distance_from_start=0.005,
+        winding_angle=0.1,
+    )
 
 
 def test_restart_improves_residual():
@@ -37,3 +58,23 @@ def test_restart_improves_residual():
     _, u_restart, v_restart = tracker.exact_svd_restart(z)
     residual_after = np.linalg.norm(M @ v_restart - epsilon * u_restart)
     assert residual_after <= residual_before
+
+
+def test_restart_step_advances_trajectory():
+    class AlwaysRestartController:
+        def predict(self, _features):
+            return 1e-2, True
+
+    np.random.seed(4)
+    A = np.random.randn(6, 6) + 1j * np.random.randn(6, 6)
+    z0 = 0.2 + 0.1j
+    epsilon, _, _ = smallest_singular_triplet(A, z0)
+    tracker = ContourTracker(
+        A=A,
+        epsilon=epsilon,
+        ode_system=ManifoldODE(A, epsilon),
+        controller=AlwaysRestartController(),
+    )
+    result = tracker.track(z0=z0, max_steps=2)
+    assert len(result["restart_indices"]) >= 1
+    assert np.abs(result["trajectory"][1] - result["trajectory"][0]) > 0.0

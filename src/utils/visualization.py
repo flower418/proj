@@ -5,6 +5,8 @@ from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.collections import LineCollection
+from matplotlib.colors import Normalize
 from scipy.linalg import svdvals
 
 
@@ -76,32 +78,39 @@ def plot_trajectory(
         ax.set_ylim(np.imag(traj_array).min() - imag_margin, np.imag(traj_array).max() + imag_margin)
         plot_pseudospectrum_background(A, epsilon, ax, resolution=100)
 
-    if step_sizes is not None and len(step_sizes) == len(traj_array) - 1:
+    if step_sizes is not None and len(step_sizes) == len(traj_array) - 1 and len(traj_array) >= 2:
+        xy = np.column_stack([np.real(traj_array), np.imag(traj_array)])
+        segments = np.stack([xy[:-1], xy[1:]], axis=1)
+        step_array = np.asarray(step_sizes, dtype=np.float64)
+        vmin = float(np.min(step_array))
+        vmax = float(np.max(step_array))
+        if np.isclose(vmin, vmax):
+            vmax = vmin + 1e-12
+        line_collection = LineCollection(
+            segments,
+            cmap="viridis",
+            norm=Normalize(vmin=vmin, vmax=vmax),
+            linewidths=3.0,
+            alpha=0.98,
+            zorder=5,
+        )
+        line_collection.set_array(step_array)
+        ax.add_collection(line_collection)
         ax.plot(
             np.real(traj_array),
             np.imag(traj_array),
-            color="tab:blue",
-            linewidth=2.6,
-            alpha=0.95,
+            color="black",
+            linewidth=0.8,
+            alpha=0.25,
             zorder=4,
             label="Tracked Contour",
         )
-        scatter = ax.scatter(
-            np.real(traj_array[:-1]),
-            np.imag(traj_array[:-1]),
-            c=np.asarray(step_sizes, dtype=np.float64),
-            cmap="viridis",
-            s=18,
-            edgecolors="none",
-            zorder=5,
-            label="Step Size",
-        )
-        plt.colorbar(scatter, ax=ax, label="Step size")
+        plt.colorbar(line_collection, ax=ax, label="Step size")
     else:
         ax.plot(np.real(traj_array), np.imag(traj_array), color="tab:blue", linewidth=2.6, alpha=0.95, label="Tracked Contour", zorder=4)
 
-    ax.scatter(np.real(traj_array[0]), np.imag(traj_array[0]), c="green", s=110, marker="o", label="Start", zorder=6, edgecolors="black", linewidths=0.5)
-    ax.scatter(np.real(traj_array[-1]), np.imag(traj_array[-1]), c="red", s=90, marker="s", label="End", zorder=6, edgecolors="black", linewidths=0.5)
+    ax.scatter(np.real(traj_array[0]), np.imag(traj_array[0]), c="green", s=130, marker="o", label="Start", zorder=6, edgecolors="black", linewidths=0.6)
+    ax.scatter(np.real(traj_array[-1]), np.imag(traj_array[-1]), c="red", s=110, marker="s", label="End", zorder=6, edgecolors="black", linewidths=0.6)
 
     if restart_indices:
         clipped = [idx for idx in restart_indices if 0 <= idx < len(traj_array)]
