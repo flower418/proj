@@ -14,7 +14,7 @@ from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.nn.controller import NNController
 from src.utils.config import load_yaml_config
-from src.utils.contour_init import sigma_min_at
+from src.utils.contour_init import project_to_contour, sigma_min_at
 from src.utils.visualization import plot_trajectory
 
 
@@ -28,8 +28,20 @@ def parse_args():
     parser.add_argument("--matrix-size", type=int, default=20)
     parser.add_argument("--matrix-type", choices=["complex", "real", "hermitian"], default="complex")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument("--max-attempts", type=int, default=8, help="Retry with new random matrix/start until a closed contour is found.")
+    parser.add_argument(
+        "--sample-mode",
+        choices=["trained_epsilon", "point_sigma"],
+        default="point_sigma",
+        help="trained_epsilon: sample a random direction then project to the config epsilon contour; point_sigma: use epsilon=sigma_min(z0I-A) from a raw random point.",
+    )
+    parser.add_argument(
+        "--min-step-size",
+        type=float,
+        default=None,
+        help="Optional lower bound applied to controller-predicted step size during demo inference.",
+    )
     parser.add_argument(
         "--radius-range",
         type=float,
@@ -65,6 +77,16 @@ def choose_random_start(A: np.ndarray, rng: np.random.Generator, radius_range: t
     return z0, anchor
 
 
+class DemoController:
+    def __init__(self, base_controller: NNController, min_step_size: float):
+        self.base_controller = base_controller
+        self.min_step_size = float(min_step_size)
+
+    def predict(self, state_np: np.ndarray) -> tuple[float, bool]:
+        ds, need_restart = self.base_controller.predict(state_np)
+        return max(float(ds), self.min_step_size), bool(need_restart)
+
+
 def load_controller(checkpoint_path: str, config: dict) -> NNController:
     controller = NNController(
         hidden_dims=config["controller"]["hidden_dims"],
@@ -95,13 +117,25 @@ def main():
         tol=config["solver"]["tol"],
         max_iter=config["solver"]["max_iter"],
     )
-    controller = load_controller(args.checkpoint, config)
+    base_controller = load_controller(args.checkpoint, config)
+    min_step_size = float(args.min_step_size if args.min_step_size is not None else config["ode"]["initial_step_size"])
+    controller = DemoController(base_controller, min_step_size=min_step_size)
+    target_epsilon = float(config["ode"]["epsilon"])
+    budget_multipliers = [1, 2, 4, 8]
 
     best_attempt = None
     for attempt_idx in range(args.max_attempts):
         A = generate_random_matrix(args.matrix_size, args.matrix_type, rng).astype(np.complex128)
-        z0, anchor = choose_random_start(A, rng, tuple(args.radius_range))
-        epsilon = sigma_min_at(A, z0)
+        z_guess, anchor = choose_random_start(A, rng, tuple(args.radius_range))
+        try:
+            if args.sample_mode == "trained_epsilon":
+                z0, epsilon = project_to_contour(A, target_epsilon, z_guess)
+                epsilon = float(sigma_min_at(A, z0))
+            else:
+                z0 = z_guess
+                epsilon = float(sigma_min_at(A, z0))
+        except ValueError:
+            continue
         ode = ManifoldODE(A, epsilon=epsilon, solver=solver)
         tracker = ContourTracker(
             A=A,
@@ -110,16 +144,42 @@ def main():
             controller=controller,
             fixed_step_size=config["ode"]["initial_step_size"],
             closure_tol=config["tracker"]["closure_tol"],
+            min_steps_between_restarts=5,
         )
-        result = tracker.track(z0=z0, max_steps=args.max_steps)
-        attempt = {
-            "attempt_index": attempt_idx,
-            "A": A,
-            "z0": z0,
-            "anchor": anchor,
-            "epsilon": epsilon,
-            "result": result,
-        }
+        best_local = None
+        for multiplier in budget_multipliers:
+            step_budget = int(max(args.max_steps * multiplier, 64))
+            result = tracker.track(z0=z0, max_steps=step_budget)
+            local_attempt = {
+                "attempt_index": attempt_idx,
+                "step_budget": step_budget,
+                "A": A,
+                "z0": z0,
+                "z_guess": z_guess,
+                "anchor": anchor,
+                "epsilon": epsilon,
+                "result": result,
+            }
+            if best_local is None:
+                best_local = local_attempt
+            else:
+                local_best_score = (
+                    int(bool(best_local["result"]["closed"])),
+                    abs(float(best_local["result"]["winding_angle"])),
+                    float(best_local["result"]["path_length"]),
+                    -float(np.abs(best_local["result"]["trajectory"][-1] - best_local["result"]["trajectory"][0])),
+                )
+                current_local_score = (
+                    int(bool(result["closed"])),
+                    abs(float(result["winding_angle"])),
+                    float(result["path_length"]),
+                    -float(np.abs(result["trajectory"][-1] - result["trajectory"][0])),
+                )
+                if current_local_score > local_best_score:
+                    best_local = local_attempt
+            if result["closed"]:
+                break
+        attempt = best_local
         if best_attempt is None:
             best_attempt = attempt
         else:
@@ -127,17 +187,17 @@ def main():
                 int(bool(best_attempt["result"]["closed"])),
                 abs(float(best_attempt["result"]["winding_angle"])),
                 float(best_attempt["result"]["path_length"]),
-                -float(best_attempt["result"]["closure_error"]) if "closure_error" in best_attempt["result"] else 0.0,
+                -float(np.abs(best_attempt["result"]["trajectory"][-1] - best_attempt["result"]["trajectory"][0])),
             )
             current_score = (
-                int(bool(result["closed"])),
-                abs(float(result["winding_angle"])),
-                float(result["path_length"]),
-                -float(np.abs(result["trajectory"][-1] - result["trajectory"][0])),
+                int(bool(attempt["result"]["closed"])),
+                abs(float(attempt["result"]["winding_angle"])),
+                float(attempt["result"]["path_length"]),
+                -float(np.abs(attempt["result"]["trajectory"][-1] - attempt["result"]["trajectory"][0])),
             )
             if current_score > best_score:
                 best_attempt = attempt
-        if result["closed"]:
+        if attempt["result"]["closed"]:
             best_attempt = attempt
             break
 
@@ -149,6 +209,7 @@ def main():
 
     A = best_attempt["A"]
     z0 = best_attempt["z0"]
+    z_guess = best_attempt["z_guess"]
     anchor = best_attempt["anchor"]
     epsilon = float(best_attempt["epsilon"])
     result = best_attempt["result"]
@@ -171,9 +232,13 @@ def main():
         "matrix_size": args.matrix_size,
         "matrix_type": args.matrix_type,
         "seed": args.seed,
+        "sample_mode": args.sample_mode,
         "attempt_index": int(best_attempt["attempt_index"]),
         "max_attempts": int(args.max_attempts),
+        "step_budget_used": int(best_attempt["step_budget"]),
+        "min_step_size": float(min_step_size),
         "epsilon": float(epsilon),
+        "z_guess": [float(np.real(z_guess)), float(np.imag(z_guess))],
         "z0": [float(np.real(z0)), float(np.imag(z0))],
         "anchor_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
         "tracked_points": int(len(result["trajectory"])),

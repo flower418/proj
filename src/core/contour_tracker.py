@@ -30,6 +30,7 @@ class ContourTracker:
         closure_tol: float = 1e-3,
         min_steps_before_closure: int = 32,
         min_winding_angle: float = 1.5 * np.pi,
+        min_steps_between_restarts: int = 5,
     ):
         self.A = np.asarray(A, dtype=np.complex128)
         self.epsilon = float(epsilon)
@@ -40,6 +41,7 @@ class ContourTracker:
         self.closure_tol = closure_tol
         self.min_steps_before_closure = int(min_steps_before_closure)
         self.min_winding_angle = float(min_winding_angle)
+        self.min_steps_between_restarts = int(min_steps_between_restarts)
 
     def initialize(self, z0: complex) -> Tuple[np.ndarray, np.ndarray]:
         _, u0, v0 = self.svd_solver(self.A, z0)
@@ -106,6 +108,7 @@ class ContourTracker:
         prev_anchor_angle = None if abs(z0 - closure_anchor) < 1e-12 else float(np.angle(z0 - closure_anchor))
         winding_angle = 0.0
         closed = False
+        steps_since_restart = self.min_steps_between_restarts
 
         for step in range(max_steps):
             features = self.extract_state_features(state.z, state.u, state.v, prev_state=state)
@@ -115,10 +118,12 @@ class ContourTracker:
             else:
                 ds = self.fixed_step_size
                 need_restart = False
+            ds = max(float(ds), 1e-12)
 
-            if need_restart:
+            if need_restart and steps_since_restart >= self.min_steps_between_restarts:
                 _, u_step, v_step = self.exact_svd_restart(state.z)
                 restart_indices.append(len(trajectory) - 1)
+                steps_since_restart = 0
             else:
                 u_step, v_step = state.u, state.v
 
@@ -150,6 +155,7 @@ class ContourTracker:
             u_history.append(u.copy())
             v_history.append(v.copy())
             step_sizes.append(float(ds))
+            steps_since_restart += 1
 
             if self.check_closure(
                 z,
