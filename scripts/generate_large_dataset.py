@@ -8,6 +8,8 @@ from typing import Dict, List
 import numpy as np
 from scipy.optimize import brentq
 
+import _bootstrap  # noqa: F401
+
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.nn.features import extract_features
 from src.train.expert_solver import ExpertSolver

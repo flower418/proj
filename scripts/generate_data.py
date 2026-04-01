@@ -5,6 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
+import _bootstrap  # noqa: F401
+
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.train.data_generator import ExpertDataGenerator
 from src.utils.config import load_yaml_config

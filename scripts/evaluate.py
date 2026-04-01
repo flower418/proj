@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+import _bootstrap  # noqa: F401
+
 from src.core.contour_tracker import ContourTracker
 from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver

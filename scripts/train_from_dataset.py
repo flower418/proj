@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+import _bootstrap  # noqa: F401
+
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.data.dataset import create_dataloaders
 from src.nn.controller import NNController
