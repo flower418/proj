@@ -8,6 +8,8 @@ import torch
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch.utils.data import DataLoader
 
+from src.utils.metrics import step_regression_metrics
+
 
 class ControllerTrainer:
     def __init__(self, model, loss_fn, optimizer: torch.optim.Optimizer, device: str = "cpu", logger=None, scheduler=None):
@@ -78,6 +80,7 @@ class ControllerTrainer:
                 "f1": float(f1_score(y_true, y_pred, zero_division=0)),
             }
         )
+        metrics.update(step_regression_metrics(ds_true, ds_pred))
         metrics["_raw"] = {"y_true": y_true, "y_prob": y_prob, "ds_pred": ds_pred, "ds_true": ds_true}
         return metrics
 

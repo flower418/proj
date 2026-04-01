@@ -145,6 +145,29 @@ epochs_run=35 final_val=0.123456 records=50000
 
 ### 4.1 使用训练好的模型推理
 
+如果你想在训练完成后立刻看效果，最推荐先跑这个随机演示脚本：
+
+```bash
+python scripts/demo_random_inference.py \
+    --checkpoint models/my_model/best_model.pt \
+    --matrix-size 20 \
+    --seed 0 \
+    --output-dir results/random_demo
+```
+
+**输出**：
+- `results/random_demo/random_matrix.npy`
+- `results/random_demo/tracked_contour.png`
+- `results/random_demo/tracking_summary.json`
+
+说明：
+- 这个脚本会随机生成矩阵 `A`
+- 然后随机选一个复平面起点 `z0`
+- 直接计算 `epsilon = sigma_min(z0I-A)`，所以追踪的就是经过这个随机点的那条等高线
+- 最后调用你的模型跑完整追踪并生成一张最终图
+
+如果你已经有自己的矩阵文件，再使用下面这个显式指定矩阵的脚本：
+
 ```bash
 python scripts/run_tracking.py \
     --matrix-path path/to/matrix.npy \
@@ -178,7 +201,13 @@ python scripts/evaluate.py \
 **关键指标**：
 - `accuracy`: 重启决策准确率 (>0.85 为优)
 - `f1`: F1 分数 (>0.75 为优)
-- `step_size_r2`: 步长预测 R² (>0.6 为优)
+- `step_size_mae`: 步长预测平均绝对误差，越小越好
+- `step_size_rmse`: 步长预测均方根误差，越小越好
+- `step_size_r2`: 步长预测 R²，越接近 1 越好
+
+说明：
+- 当你使用 `--data-dir ... --split test` 做数据集评估时，输出会同时包含分类指标和步长回归指标。
+- 只有在不传 `--data-dir`、走合成矩阵评估模式时，才会额外出现 `closure_error` 和 `num_restarts` 这类轨迹级指标。
 
 ---
 
@@ -241,12 +270,11 @@ python scripts/train_from_dataset.py \
     --device cpu
 
 # 3. 推理
-python scripts/run_tracking.py \
-    --demo-random \
-    --matrix-size 20 \
+python scripts/demo_random_inference.py \
     --checkpoint models/quick/best_model.pt \
-    --plot-out results/quick.png \
-    --epsilon 0.1
+    --matrix-size 20 \
+    --seed 0 \
+    --output-dir results/quick_demo
 ```
 
 ### 生产流程（6 小时）
@@ -290,6 +318,7 @@ proj/
 │   ├── generate_large_dataset.py  # 数据生成
 │   ├── train_from_dataset.py      # 训练
 │   ├── evaluate.py                # 评估
+│   ├── demo_random_inference.py   # 随机矩阵完整推理演示
 │   └── run_tracking.py            # 推理
 ├── src/
 │   └── data/dataset.py            # 数据加载
@@ -315,6 +344,7 @@ proj/
 | 生成数据 | `python scripts/generate_large_dataset.py --target-samples 50000 --output-dir data/my_data` |
 | 检查数据 | `python src/data/dataset.py --data-dir data/my_data` |
 | 训练 | `python scripts/train_from_dataset.py --data-dir data/my_data --experiment-name my_model` |
+| 随机推理演示 | `python scripts/demo_random_inference.py --checkpoint models/my_model/best_model.pt --matrix-size 20 --seed 0 --output-dir results/random_demo` |
 | 推理 | `python scripts/run_tracking.py --matrix-path path/to/matrix.npy --checkpoint models/my_model/best_model.pt --plot-out results/out.png --epsilon 0.1` |
 | 评估 | `python scripts/evaluate.py --checkpoint models/my_model/best_model.pt --data-dir data/my_data` |
 | 训练总图 | `logs/<experiment>/training_summary.png` |

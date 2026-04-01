@@ -35,6 +35,23 @@ python scripts/train_from_dataset.py \
 ### 4. 推理
 
 ```bash
+python scripts/demo_random_inference.py \
+    --checkpoint models/my_model/best_model.pt \
+    --matrix-size 20 \
+    --seed 0 \
+    --output-dir results/random_demo
+```
+
+这会自动：
+- 随机生成一个矩阵并保存成 `.npy`
+- 随机选择复平面起点 `z0`
+- 计算 `epsilon = sigma_min(z0I-A)`
+- 调用训练好的模型追踪这一条完整等高线
+- 输出最终图像和摘要 JSON
+
+如果你已经有自己的矩阵，也可以用：
+
+```bash
 python scripts/run_tracking.py \
     --matrix-path path/to/matrix.npy \
     --checkpoint models/my_model/best_model.pt \
@@ -54,6 +71,7 @@ proj/
 │   ├── generate_large_dataset.py  # 数据生成
 │   ├── train_from_dataset.py      # 训练模型
 │   ├── evaluate.py                # 评估模型
+│   ├── demo_random_inference.py   # 随机矩阵完整推理演示
 │   └── run_tracking.py            # 推理可视化
 ├── src/
 │   ├── core/                      # 核心算法
