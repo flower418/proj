@@ -52,6 +52,7 @@ def parse_args():
     )
     parser.add_argument("--print-every", type=int, default=1, help="Print NN decisions every k tracking steps.")
     parser.add_argument("--quiet", action="store_true", help="Disable step-by-step console diagnostics.")
+    parser.add_argument("--require-closed", action="store_true", help="Raise an error if no closed contour is found.")
     return parser.parse_args()
 
 
@@ -127,14 +128,18 @@ def make_step_printer(print_every: int):
         restart_prob_str = "None" if restart_prob is None else f"{restart_prob:.4f}"
         print(
             f"  step={step:04d} "
+            f"raw_ds={info.get('raw_ds', info['ds']):.6f} "
             f"ds={info['ds']:.6f} "
             f"p_restart={restart_prob_str} "
             f"need_restart={int(info['need_restart'])} "
             f"applied_restart={int(info['applied_restart'])} "
+            f"applied_projection={int(info.get('applied_projection', False))} "
+            f"backtracks={int(info.get('backtracks', 0))} "
             f"|dz|={info['step_distance']:.6f} "
             f"|z-z0|={info['distance_to_start']:.6f} "
             f"path={info['path_length']:.6f} "
             f"wind={info['winding_angle']:.4f} "
+            f"sigma_err={info.get('sigma_error', float('nan')):.6e} "
             f"z={_format_complex(info['z_next'])}"
         )
 
@@ -276,10 +281,15 @@ def main():
                 f"path={best_result['path_length']:.6f} "
                 f"wind={best_result['winding_angle']:.4f}"
             )
-        raise RuntimeError(
-            f"Failed to obtain a closed contour after {args.max_attempts} attempts. "
-            "Increase --max-attempts or inspect the controller predictions."
-        )
+        if best_attempt is None:
+            raise RuntimeError(
+                f"Failed to obtain any valid tracking attempt after {args.max_attempts} attempts."
+            )
+        if args.require_closed:
+            raise RuntimeError(
+                f"Failed to obtain a closed contour after {args.max_attempts} attempts. "
+                "Increase --max-attempts or inspect the controller predictions."
+            )
 
     A = best_attempt["A"]
     z0 = best_attempt["z0"]
@@ -322,6 +332,7 @@ def main():
         "path_length": float(result["path_length"]),
         "max_distance_from_start": float(result["max_distance_from_start"]),
         "winding_angle": float(result["winding_angle"]),
+        "num_projections": int(len(result.get("projection_indices", []))),
     }
 
     with result_out.open("w", encoding="utf-8") as fh:
