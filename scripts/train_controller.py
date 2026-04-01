@@ -122,6 +122,9 @@ def main():
         json.dump(history, fh, indent=2)
     logger.close()
     print(f"epochs_run={len(history)} final_val={history[-1]['val']['loss']:.6f} records={len(records)}")
+    print(f"local_visuals={logger.fig_dir}")
+    print(f"overview_png={logger.fig_dir / 'training_dashboard_latest.png'}")
+    print(f"feature_png={logger.fig_dir / 'feature_distribution_latest.png'}")
 
 
 if __name__ == "__main__":

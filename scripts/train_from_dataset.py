@@ -4,12 +4,10 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
 import torch
 
 import _bootstrap  # noqa: F401
 
-from src.core.pseudoinverse import PseudoinverseSolver
 from src.data.dataset import create_dataloaders
 from src.nn.controller import NNController
 from src.nn.loss import ControllerLoss
@@ -85,6 +83,8 @@ def main():
         "training_config": train_cfg,
         "args": vars(args),
     })
+    sample_batch = next(iter(train_loader))
+    logger.log_feature_distribution(sample_batch["features"].cpu().numpy(), epoch=0)
 
     # 训练器
     trainer = ControllerTrainer(
@@ -115,9 +115,13 @@ def main():
     # 在测试集上评估
     print("\n在测试集上评估...")
     test_metrics = trainer.evaluate(test_loader)
+    raw = test_metrics.pop("_raw", None)
     print(f"Test Loss: {test_metrics['loss']:.6f}")
     print(f"Test Accuracy: {test_metrics.get('accuracy', 0):.4f}")
     print(f"Test F1: {test_metrics.get('f1', 0):.4f}")
+    if raw is not None:
+        logger.log_confusion_matrix(raw["y_true"], (raw["y_prob"] >= 0.5).astype(int), epoch=len(history))
+        logger.log_prediction_scatter(raw["ds_pred"], raw["ds_true"], epoch=len(history))
 
     # 保存测试指标
     metrics_path = Path(args.checkpoint_dir) / args.experiment_name / "test_metrics.json"
@@ -127,6 +131,9 @@ def main():
     logger.close()
     print(f"\n训练完成！epochs_run={len(history)} final_val={history[-1]['val']['loss']:.6f}")
     print(f"模型保存在：{args.checkpoint_dir}/{args.experiment_name}/best_model.pt")
+    print(f"本地图像目录：{logger.fig_dir}")
+    print(f"训练总览：{logger.fig_dir / 'training_dashboard_latest.png'}")
+    print(f"测试混淆矩阵：{logger.fig_dir / 'confusion_matrix_latest.png'}")
 
 
 if __name__ == "__main__":
