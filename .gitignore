@@ -3,3 +3,5 @@ QWEN.md
 __pycache__
 data
 logs
+models
+results

@@ -110,8 +110,8 @@ class ControllerTrainer:
             )
             if self.logger is not None:
                 lr = float(self.optimizer.param_groups[0]["lr"])
-                self.logger.log_epoch(epoch, train_metrics, val_metrics, lr)
                 self.logger.log_model_weights(self.model, epoch)
+                self.logger.log_epoch(epoch, train_metrics, val_metrics, lr)
                 if raw is not None:
                     self.logger.log_confusion_matrix(raw["y_true"], (raw["y_prob"] >= 0.5).astype(np.int64), epoch)
                     self.logger.log_prediction_scatter(raw["ds_pred"], raw["ds_true"], epoch)

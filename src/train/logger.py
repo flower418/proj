@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Dict, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,14 +11,14 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precisio
 
 
 class TrainingLogger:
-    """Local-file training logger with progressive visual summaries."""
+    """Local logger that prints every epoch and saves one final summary figure."""
 
     def __init__(self, log_dir: str = "logs", experiment_name: Optional[str] = None):
         if experiment_name is None:
             experiment_name = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_dir = Path(log_dir) / experiment_name
-        self.fig_dir = self.log_dir / "figures"
-        self.fig_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.summary_path = self.log_dir / "training_summary.png"
         self.history = {
             "train_loss": [],
             "val_loss": [],
@@ -34,16 +34,17 @@ class TrainingLogger:
             "weight_norm": [],
             "grad_norm": [],
         }
+        self._latest_confusion_matrix: np.ndarray | None = None
+        self._latest_step_scatter: tuple[np.ndarray, np.ndarray] | None = None
+        self._initial_features: np.ndarray | None = None
 
     def save_config(self, config: Dict) -> None:
-        config_path = self.log_dir / "config.json"
-        with config_path.open("w", encoding="utf-8") as fh:
+        with (self.log_dir / "config.json").open("w", encoding="utf-8") as fh:
             json.dump(config, fh, indent=2, ensure_ascii=False)
 
     def log_scalars(self, scalars: Dict[str, float], global_step: int, prefix: str = "") -> None:
-        scalars_path = self.log_dir / "scalars.jsonl"
         payload = {"step": global_step, "prefix": prefix, "scalars": {k: float(v) for k, v in scalars.items()}}
-        with scalars_path.open("a", encoding="utf-8") as fh:
+        with (self.log_dir / "scalars.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def log_epoch(self, epoch: int, train_metrics: Dict[str, float], val_metrics: Dict[str, float], lr: float) -> None:
@@ -61,100 +62,47 @@ class TrainingLogger:
         self.log_scalars(train_metrics, epoch, prefix="train/")
         self.log_scalars(val_metrics, epoch, prefix="val/")
         self._save_history()
-        self._save_epoch_dashboard(epoch)
+        self._print_epoch_summary(epoch, train_metrics, val_metrics, lr)
 
     def log_model_weights(self, model, epoch: int) -> None:
-        weight_norms = {}
-        grad_norms = {}
-        for name, param in model.named_parameters():
-            weight_norms[name] = float(np.linalg.norm(param.detach().cpu().numpy().ravel()))
+        weight_norms = []
+        grad_norms = []
+        for _, param in model.named_parameters():
+            weight_norms.append(float(np.linalg.norm(param.detach().cpu().numpy().ravel())))
             if param.grad is not None:
-                grad_norms[name] = float(np.linalg.norm(param.grad.detach().cpu().numpy().ravel()))
+                grad_norms.append(float(np.linalg.norm(param.grad.detach().cpu().numpy().ravel())))
 
-        self.history["weight_norm"].append(float(np.mean(list(weight_norms.values())) if weight_norms else 0.0))
-        self.history["grad_norm"].append(float(np.mean(list(grad_norms.values())) if grad_norms else 0.0))
-
-        payload = {"epoch": epoch, "weight_norms": weight_norms, "grad_norms": grad_norms}
+        self.history["weight_norm"].append(float(np.mean(weight_norms) if weight_norms else 0.0))
+        self.history["grad_norm"].append(float(np.mean(grad_norms) if grad_norms else 0.0))
+        payload = {
+            "epoch": epoch,
+            "mean_weight_norm": self.history["weight_norm"][-1],
+            "mean_grad_norm": self.history["grad_norm"][-1],
+        }
         with (self.log_dir / "model_norms.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-        if weight_norms:
-            names = list(weight_norms.keys())
-            axes[0].bar(range(len(names)), list(weight_norms.values()))
-            axes[0].set_title("Weight Norms")
-            axes[0].set_xticks(range(len(names)))
-            axes[0].set_xticklabels(names, rotation=75, fontsize=7)
-        if grad_norms:
-            names = list(grad_norms.keys())
-            axes[1].bar(range(len(names)), list(grad_norms.values()), color="tab:orange")
-            axes[1].set_title("Gradient Norms")
-            axes[1].set_xticks(range(len(names)))
-            axes[1].set_xticklabels(names, rotation=75, fontsize=7)
-        fig.tight_layout()
-        fig.savefig(self.fig_dir / f"parameter_norms_epoch_{epoch:04d}.png", dpi=150, bbox_inches="tight")
-        fig.savefig(self.fig_dir / "parameter_norms_latest.png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        self._save_history()
-
-    def log_confusion_matrix(self, y_true: np.ndarray, y_pred: np.ndarray, epoch: int, class_names: Optional[Iterable[str]] = None) -> None:
-        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-        fig, ax = plt.subplots(figsize=(6, 5))
-        im = ax.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
-        fig.colorbar(im, ax=ax)
-        class_names = list(class_names or ["keep", "restart"])
-        ax.set_xticks(range(len(class_names)))
-        ax.set_yticks(range(len(class_names)))
-        ax.set_xticklabels(class_names)
-        ax.set_yticklabels(class_names)
-        ax.set_xlabel("Predicted")
-        ax.set_ylabel("True")
-        ax.set_title(f"Confusion Matrix Epoch {epoch}")
-        for i in range(cm.shape[0]):
-            for j in range(cm.shape[1]):
-                ax.text(j, i, str(cm[i, j]), ha="center", va="center")
-        fig.tight_layout()
-        fig.savefig(self.fig_dir / f"confusion_matrix_epoch_{epoch:04d}.png", dpi=150, bbox_inches="tight")
-        fig.savefig(self.fig_dir / "confusion_matrix_latest.png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
+    def log_confusion_matrix(self, y_true: np.ndarray, y_pred: np.ndarray, epoch: int) -> None:
+        del epoch
+        self._latest_confusion_matrix = confusion_matrix(y_true, y_pred, labels=[0, 1])
 
     def log_prediction_scatter(self, ds_pred: np.ndarray, ds_true: np.ndarray, epoch: int) -> None:
+        del epoch
         mask = (ds_true > 0.0) & (ds_pred > 0.0)
         if not np.any(mask):
+            self._latest_step_scatter = None
             return
-        ds_true = ds_true[mask]
-        ds_pred = ds_pred[mask]
-        fig, ax = plt.subplots(figsize=(6, 6))
-        ax.scatter(ds_true, ds_pred, alpha=0.35, s=14)
-        lo = min(float(np.min(ds_true)), float(np.min(ds_pred)))
-        hi = max(float(np.max(ds_true)), float(np.max(ds_pred)))
-        ax.plot([lo, hi], [lo, hi], "r--", linewidth=1.2)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("True Step Size")
-        ax.set_ylabel("Predicted Step Size")
-        r2 = float(r2_score(ds_true, ds_pred)) if len(ds_true) > 1 else 0.0
-        ax.set_title(f"Step Prediction Epoch {epoch} | R2={r2:.3f}")
-        fig.tight_layout()
-        fig.savefig(self.fig_dir / f"step_scatter_epoch_{epoch:04d}.png", dpi=150, bbox_inches="tight")
-        fig.savefig(self.fig_dir / "step_scatter_latest.png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        self._latest_step_scatter = (
+            np.asarray(ds_true[mask], dtype=np.float64),
+            np.asarray(ds_pred[mask], dtype=np.float64),
+        )
 
     def log_feature_distribution(self, features: np.ndarray, epoch: int) -> None:
-        fig, axes = plt.subplots(2, 4, figsize=(14, 7))
-        axes = axes.flatten()
-        feature_names = ["f1", "f2", "f3", "f4", "f5", "f6", "f7"]
-        for idx, name in enumerate(feature_names):
-            axes[idx].hist(features[:, idx], bins=40, alpha=0.75, color="tab:blue")
-            axes[idx].set_title(name)
-        axes[-1].axis("off")
-        fig.tight_layout()
-        fig.savefig(self.fig_dir / f"feature_distribution_epoch_{epoch:04d}.png", dpi=150, bbox_inches="tight")
-        fig.savefig(self.fig_dir / "feature_distribution_latest.png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        del epoch
+        self._initial_features = np.asarray(features, dtype=np.float32)
 
     def log_learning_curves(self) -> None:
-        self._save_epoch_dashboard(len(self.history["train_loss"]) - 1)
+        self._save_final_summary()
 
     def compute_classification_metrics(self, y_true: np.ndarray, y_prob: np.ndarray) -> Dict[str, float]:
         y_pred = (y_prob >= 0.5).astype(np.int64)
@@ -167,17 +115,34 @@ class TrainingLogger:
 
     def close(self) -> None:
         self._save_history()
+        self._save_final_summary()
 
     def _save_history(self) -> None:
         with (self.log_dir / "history.json").open("w", encoding="utf-8") as fh:
             json.dump(self.history, fh, indent=2, ensure_ascii=False)
 
-    def _save_epoch_dashboard(self, epoch: int) -> None:
+    def _print_epoch_summary(self, epoch: int, train_metrics: Dict[str, float], val_metrics: Dict[str, float], lr: float) -> None:
+        weight_norm = self.history["weight_norm"][-1] if self.history["weight_norm"] else 0.0
+        grad_norm = self.history["grad_norm"][-1] if self.history["grad_norm"] else 0.0
+        print(
+            f"[Epoch {epoch + 1:03d}] "
+            f"train_loss={train_metrics.get('loss', 0.0):.6f} "
+            f"val_loss={val_metrics.get('loss', 0.0):.6f} "
+            f"step={val_metrics.get('step_loss', 0.0):.6f} "
+            f"restart={val_metrics.get('restart_loss', 0.0):.6f} "
+            f"acc={val_metrics.get('accuracy', 0.0):.4f} "
+            f"f1={val_metrics.get('f1', 0.0):.4f} "
+            f"lr={lr:.2e} "
+            f"|W|={weight_norm:.3e} "
+            f"|G|={grad_norm:.3e}"
+        )
+
+    def _save_final_summary(self) -> None:
         epochs = np.arange(1, len(self.history["train_loss"]) + 1)
         if len(epochs) == 0:
             return
 
-        fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
         axes[0, 0].plot(epochs, self.history["train_loss"], label="train", linewidth=2)
         axes[0, 0].plot(epochs, self.history["val_loss"], label="val", linewidth=2)
@@ -188,43 +153,66 @@ class TrainingLogger:
 
         axes[0, 1].plot(epochs, self.history["train_step_loss"], label="train_step", linewidth=2)
         axes[0, 1].plot(epochs, self.history["val_step_loss"], label="val_step", linewidth=2)
-        axes[0, 1].set_title("Step Regression Loss")
+        axes[0, 1].plot(epochs, self.history["train_restart_loss"], label="train_restart", linewidth=2)
+        axes[0, 1].plot(epochs, self.history["val_restart_loss"], label="val_restart", linewidth=2)
+        axes[0, 1].set_title("Component Losses")
         axes[0, 1].set_xlabel("Epoch")
         axes[0, 1].grid(True, alpha=0.3)
         axes[0, 1].legend()
 
-        axes[0, 2].plot(epochs, self.history["train_restart_loss"], label="train_restart", linewidth=2)
-        axes[0, 2].plot(epochs, self.history["val_restart_loss"], label="val_restart", linewidth=2)
-        axes[0, 2].set_title("Restart Classification Loss")
+        axes[0, 2].plot(epochs, self.history["val_accuracy"], label="accuracy", linewidth=2)
+        axes[0, 2].plot(epochs, self.history["val_f1"], label="f1", linewidth=2)
+        axes[0, 2].plot(epochs, self.history["val_precision"], label="precision", linewidth=1.5)
+        axes[0, 2].plot(epochs, self.history["val_recall"], label="recall", linewidth=1.5)
+        axes[0, 2].set_ylim(0.0, 1.05)
+        axes[0, 2].set_title("Validation Metrics")
         axes[0, 2].set_xlabel("Epoch")
         axes[0, 2].grid(True, alpha=0.3)
         axes[0, 2].legend()
 
-        axes[1, 0].plot(epochs, self.history["val_accuracy"], label="accuracy", linewidth=2)
-        axes[1, 0].plot(epochs, self.history["val_f1"], label="f1", linewidth=2)
-        axes[1, 0].plot(epochs, self.history["val_precision"], label="precision", linewidth=1.5, alpha=0.9)
-        axes[1, 0].plot(epochs, self.history["val_recall"], label="recall", linewidth=1.5, alpha=0.9)
-        axes[1, 0].set_title("Validation Classification Metrics")
+        axes[1, 0].semilogy(epochs, np.maximum(self.history["learning_rate"], 1e-12), label="lr", linewidth=2)
+        axes[1, 0].plot(epochs, np.maximum(self.history["weight_norm"], 1e-12), label="weight_norm", linewidth=2)
+        axes[1, 0].plot(epochs, np.maximum(self.history["grad_norm"], 1e-12), label="grad_norm", linewidth=2)
+        axes[1, 0].set_title("LR / Norm Trend")
         axes[1, 0].set_xlabel("Epoch")
-        axes[1, 0].set_ylim(0.0, 1.05)
         axes[1, 0].grid(True, alpha=0.3)
         axes[1, 0].legend()
 
-        axes[1, 1].semilogy(epochs, np.maximum(self.history["learning_rate"], 1e-12), label="lr", linewidth=2)
-        axes[1, 1].set_title("Learning Rate")
-        axes[1, 1].set_xlabel("Epoch")
-        axes[1, 1].grid(True, alpha=0.3)
-        axes[1, 1].legend()
+        if self._latest_confusion_matrix is not None:
+            cm = self._latest_confusion_matrix
+            im = axes[1, 1].imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
+            fig.colorbar(im, ax=axes[1, 1], fraction=0.046, pad=0.04)
+            axes[1, 1].set_title("Final Confusion Matrix")
+            axes[1, 1].set_xticks([0, 1])
+            axes[1, 1].set_yticks([0, 1])
+            axes[1, 1].set_xticklabels(["keep", "restart"])
+            axes[1, 1].set_yticklabels(["keep", "restart"])
+            for i in range(cm.shape[0]):
+                for j in range(cm.shape[1]):
+                    axes[1, 1].text(j, i, str(cm[i, j]), ha="center", va="center")
+        else:
+            axes[1, 1].axis("off")
 
-        axes[1, 2].plot(epochs[: len(self.history["weight_norm"])], self.history["weight_norm"], label="weight_norm", linewidth=2)
-        axes[1, 2].plot(epochs[: len(self.history["grad_norm"])], self.history["grad_norm"], label="grad_norm", linewidth=2)
-        axes[1, 2].set_title("Parameter / Gradient Norm Trend")
-        axes[1, 2].set_xlabel("Epoch")
-        axes[1, 2].grid(True, alpha=0.3)
-        axes[1, 2].legend()
+        if self._latest_step_scatter is not None:
+            ds_true, ds_pred = self._latest_step_scatter
+            axes[1, 2].scatter(ds_true, ds_pred, alpha=0.35, s=12)
+            lo = min(float(np.min(ds_true)), float(np.min(ds_pred)))
+            hi = max(float(np.max(ds_true)), float(np.max(ds_pred)))
+            axes[1, 2].plot([lo, hi], [lo, hi], "r--", linewidth=1.2)
+            axes[1, 2].set_xscale("log")
+            axes[1, 2].set_yscale("log")
+            r2 = float(r2_score(ds_true, ds_pred)) if len(ds_true) > 1 else 0.0
+            axes[1, 2].set_title(f"Final Step Scatter (R2={r2:.3f})")
+            axes[1, 2].set_xlabel("True ds")
+            axes[1, 2].set_ylabel("Pred ds")
+            axes[1, 2].grid(True, alpha=0.3)
+        elif self._initial_features is not None:
+            axes[1, 2].hist(self._initial_features[:, 0], bins=40, alpha=0.8)
+            axes[1, 2].set_title("Initial Feature f1 Distribution")
+        else:
+            axes[1, 2].axis("off")
 
-        fig.suptitle(f"Training Overview Through Epoch {epoch}", fontsize=14)
+        fig.suptitle("Training Summary", fontsize=16)
         fig.tight_layout()
-        fig.savefig(self.fig_dir / f"training_dashboard_epoch_{epoch:04d}.png", dpi=160, bbox_inches="tight")
-        fig.savefig(self.fig_dir / "training_dashboard_latest.png", dpi=160, bbox_inches="tight")
+        fig.savefig(self.summary_path, dpi=160, bbox_inches="tight")
         plt.close(fig)

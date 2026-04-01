@@ -131,9 +131,7 @@ def main():
     logger.close()
     print(f"\n训练完成！epochs_run={len(history)} final_val={history[-1]['val']['loss']:.6f}")
     print(f"模型保存在：{args.checkpoint_dir}/{args.experiment_name}/best_model.pt")
-    print(f"本地图像目录：{logger.fig_dir}")
-    print(f"训练总览：{logger.fig_dir / 'training_dashboard_latest.png'}")
-    print(f"测试混淆矩阵：{logger.fig_dir / 'confusion_matrix_latest.png'}")
+    print(f"训练总图：{logger.summary_path}")
 
 
 if __name__ == "__main__":
