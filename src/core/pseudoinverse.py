@@ -58,7 +58,14 @@ class PseudoinverseSolver:
             real_op = self._build_real_block_operator(op, n)
             real_b = self._complex_to_real(b)
             solver = self._select_solver(is_complex=True)
-            real_x, info = solver(real_op, real_b, rtol=self.tol, maxiter=self.max_iter, callback=callback)
+            solver_kwargs = {
+                "rtol": self.tol,
+                "maxiter": self.max_iter,
+                "callback": callback,
+            }
+            if solver in {gmres, lgmres}:
+                solver_kwargs["callback_type"] = "legacy"
+            real_x, info = solver(real_op, real_b, **solver_kwargs)
             x = self._real_to_complex(np.asarray(real_x, dtype=np.float64))
         else:
             solver = self._select_solver(is_complex=False)
