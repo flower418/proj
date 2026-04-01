@@ -98,16 +98,17 @@ def main():
 
     # 训练
     epochs = train_cfg.get("epochs", args.epochs)
+    experiment_dir = Path(args.checkpoint_dir) / args.experiment_name
     history = trainer.train(
         train_loader=train_loader,
         val_loader=val_loader,
         epochs=epochs,
         early_stop_patience=train_cfg.get("early_stop_patience", 10),
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=str(experiment_dir),
     )
 
     # 保存训练历史
-    history_path = Path(args.checkpoint_dir) / args.experiment_name / "training_history.json"
+    history_path = experiment_dir / "training_history.json"
     history_path.parent.mkdir(parents=True, exist_ok=True)
     with history_path.open("w") as f:
         json.dump(history, f, indent=2)
@@ -124,13 +125,13 @@ def main():
         logger.log_prediction_scatter(raw["ds_pred"], raw["ds_true"], epoch=len(history))
 
     # 保存测试指标
-    metrics_path = Path(args.checkpoint_dir) / args.experiment_name / "test_metrics.json"
+    metrics_path = experiment_dir / "test_metrics.json"
     with metrics_path.open("w") as f:
         json.dump(test_metrics, f, indent=2)
 
     logger.close()
     print(f"\n训练完成！epochs_run={len(history)} final_val={history[-1]['val']['loss']:.6f}")
-    print(f"模型保存在：{args.checkpoint_dir}/{args.experiment_name}/best_model.pt")
+    print(f"模型保存在：{experiment_dir / 'best_model.pt'}")
     print(f"训练总图：{logger.summary_path}")
 
 

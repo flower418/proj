@@ -98,13 +98,14 @@ def main():
         logger=logger,
         scheduler=scheduler,
     )
+    experiment_dir = Path(args.checkpoint_dir) / (args.experiment_name or "default_run")
     history = trainer.train(
         train_dataset,
         val_dataset,
         epochs=train_cfg.get("epochs", config["training"]["epochs"]),
         early_stop_patience=train_cfg.get("early_stop_patience", 10),
         batch_size=train_cfg.get("batch_size", config["training"]["batch_size"]),
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=str(experiment_dir),
     )
 
     data_out = Path(args.data_out)
@@ -116,13 +117,14 @@ def main():
         y_restart=np.array([record["y_restart"] for record in records], dtype=np.int64),
     )
 
-    history_path = Path(args.checkpoint_dir) / "training_history.json"
+    history_path = experiment_dir / "training_history.json"
     history_path.parent.mkdir(parents=True, exist_ok=True)
     with history_path.open("w", encoding="utf-8") as fh:
         json.dump(history, fh, indent=2)
     logger.close()
     print(f"epochs_run={len(history)} final_val={history[-1]['val']['loss']:.6f} records={len(records)}")
     print(f"training_summary={logger.summary_path}")
+    print(f"best_model={experiment_dir / 'best_model.pt'}")
 
 
 if __name__ == "__main__":

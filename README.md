@@ -36,9 +36,11 @@ python scripts/train_from_dataset.py \
 
 ```bash
 python scripts/run_tracking.py \
-    --matrix-size 50 \
+    --matrix-path path/to/matrix.npy \
     --checkpoint models/my_model/best_model.pt \
-    --plot-out results/trajectory.png
+    --plot-out results/trajectory.png \
+    --z0-real 0.5 \
+    --z0-imag 0.2
 ```
 
 详细教程请查看：**[SERVER_TUTORIAL.md](SERVER_TUTORIAL.md)**
@@ -67,7 +69,7 @@ proj/
 │   │   ├── expert_solver.py       # 专家求解器 (RK45)
 │   │   ├── dagger_augmentation.py # DAgger 增强
 │   │   ├── trainer.py             # 训练循环
-│   │   └── logger.py              # TensorBoard 日志
+│   │   └── logger.py              # 本地训练日志与总图
 │   ├── solvers/                   # 数值求解器
 │   │   └── rk4.py                 # RK4 积分器
 │   ├── utils/                     # 工具函数
@@ -83,7 +85,7 @@ proj/
 ├── tests/                         # 单元测试
 ├── data/                          # 生成的数据
 ├── models/                        # 训练好的模型
-├── logs/                          # TensorBoard 日志
+├── logs/                          # 本地训练总图与历史
 └── results/                       # 推理结果图
 ```
 
@@ -185,7 +187,14 @@ pytest tests/ -v
 
 ## 引用
 
-算法细节请参考 `idea.md` 中的数学推导。
+算法解决的是：
+- 给定矩阵 `A`
+- 给定伪谱水平 `epsilon`
+- 给定边界上的起点 `z0`
+
+然后沿着该矩阵的 `epsilon`-伪谱等高线追踪并闭合出完整轮廓。
+
+它不是“仅凭几个点直接补全轮廓”的黑盒插值器。控制器学的是追踪过程中的步长与重启策略，不替代矩阵本身的伪谱定义。
 
 ---
 

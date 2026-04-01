@@ -5,6 +5,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import torch
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch.utils.data import DataLoader
 
 
@@ -68,8 +69,15 @@ class ControllerTrainer:
         y_true = np.concatenate(all_labels).astype(np.int64)
         ds_pred = np.concatenate(all_ds_pred)
         ds_true = np.concatenate(all_ds_true)
-        if self.logger is not None:
-            metrics.update(self.logger.compute_classification_metrics(y_true, y_prob))
+        y_pred = (y_prob >= 0.5).astype(np.int64)
+        metrics.update(
+            {
+                "accuracy": float(accuracy_score(y_true, y_pred)),
+                "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+                "recall": float(recall_score(y_true, y_pred, zero_division=0)),
+                "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+            }
+        )
         metrics["_raw"] = {"y_true": y_true, "y_prob": y_prob, "ds_pred": ds_pred, "ds_true": ds_true}
         return metrics
 

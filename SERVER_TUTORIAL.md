@@ -119,16 +119,19 @@ python scripts/train_from_dataset.py \
 
 **输出**：
 - `models/my_model/best_model.pt` (最佳模型)
-- `logs/my_model/` (TensorBoard 日志)
+- `logs/my_model/training_summary.png` (训练总图)
+- `logs/my_model/history.json` (训练历史)
 
-### 3.2 监控训练
+### 3.2 查看训练结果
 
-打开新终端：
+直接查看本地图像：
 ```bash
-tensorboard --logdir=logs/ --port 6006
+ls logs/my_model/
 ```
 
-浏览器访问：`http://<服务器 IP>:6006`
+重点文件：
+- `logs/my_model/training_summary.png`
+- `logs/my_model/history.json`
 
 ### 3.3 训练完成标志
 
@@ -145,13 +148,19 @@ epochs_run=35 final_val=0.123456 records=50000
 
 ```bash
 python scripts/run_tracking.py \
-    --matrix-size 50 \
+    --matrix-path path/to/matrix.npy \
     --checkpoint models/my_model/best_model.pt \
     --plot-out results/my_trajectory.png \
-    --max-steps 100
+    --max-steps 100 \
+    --z0-real 0.5 \
+    --z0-imag 0.2
 ```
 
 **输出**：`results/my_trajectory.png` (轨迹图)
+
+说明：
+- `run_tracking.py` 追踪的是“给定矩阵 A、给定边界起点 z0”对应的完整伪谱等高线。
+- 如果不提供 `--matrix-path`，脚本只能进入 `--demo-random` 演示模式，这不是正式实验模式。
 
 ### 4.2 评估模型性能
 
@@ -232,9 +241,12 @@ python scripts/train_from_dataset.py \
 
 # 3. 推理
 python scripts/run_tracking.py \
+    --demo-random \
     --matrix-size 20 \
     --checkpoint models/quick/best_model.pt \
-    --plot-out results/quick.png
+    --plot-out results/quick.png \
+    --z0-real 0.5 \
+    --z0-imag 0.2
 ```
 
 ### 生产流程（6 小时）
@@ -262,9 +274,11 @@ python scripts/evaluate.py \
 
 # 4. 可视化
 python scripts/run_tracking.py \
-    --matrix-size 50 \
+    --matrix-path path/to/matrix.npy \
     --checkpoint models/prod/best_model.pt \
-    --plot-out results/prod.png
+    --plot-out results/prod.png \
+    --z0-real 0.5 \
+    --z0-imag 0.2
 ```
 
 ---
@@ -288,7 +302,7 @@ proj/
 │   └── my_model/
 │       └── best_model.pt          # 训练好的模型
 ├── logs/
-│   └── my_model/                  # TensorBoard 日志
+│   └── my_model/                  # 本地训练总图与历史
 └── results/
     └── my_trajectory.png          # 推理结果图
 ```
@@ -302,9 +316,9 @@ proj/
 | 生成数据 | `python scripts/generate_large_dataset.py --target-samples 50000 --output-dir data/my_data` |
 | 检查数据 | `python src/data/dataset.py --data-dir data/my_data` |
 | 训练 | `python scripts/train_from_dataset.py --data-dir data/my_data --experiment-name my_model` |
-| 推理 | `python scripts/run_tracking.py --checkpoint models/my_model/best_model.pt --plot-out results/out.png` |
+| 推理 | `python scripts/run_tracking.py --matrix-path path/to/matrix.npy --checkpoint models/my_model/best_model.pt --plot-out results/out.png --z0-real 0.5 --z0-imag 0.2` |
 | 评估 | `python scripts/evaluate.py --checkpoint models/my_model/best_model.pt --data-dir data/my_data` |
-| TensorBoard | `tensorboard --logdir=logs/` |
+| 训练总图 | `logs/<experiment>/training_summary.png` |
 
 ---
 
