@@ -12,7 +12,7 @@ import _bootstrap  # noqa: F401
 from src.core.contour_tracker import ContourTracker
 from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
-from src.nn.controller import NNController
+from src.nn.controller import build_controller_from_checkpoint
 from src.utils.config import load_yaml_config
 from src.utils.contour_init import auto_select_contour_start, project_to_contour, sigma_min_at
 from src.utils.visualization import plot_trajectory
@@ -100,14 +100,8 @@ def main():
     )
     controller = None
     if args.checkpoint is not None:
-        controller = NNController(
-            hidden_dims=config["controller"]["hidden_dims"],
-            dropout=config["controller"]["dropout"],
-            norm_type=config["controller"]["norm_type"],
-            step_size_min=config["controller"]["step_size_min"],
-            step_size_max=config["controller"]["step_size_max"],
-        )
         checkpoint = torch.load(args.checkpoint, map_location="cpu")
+        controller = build_controller_from_checkpoint(checkpoint, config["controller"], input_dim=7)
         controller.load_state_dict(checkpoint["model_state_dict"])
         controller.eval()
     ode = ManifoldODE(A, epsilon=epsilon, solver=solver)

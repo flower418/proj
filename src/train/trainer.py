@@ -13,13 +13,23 @@ from src.utils.metrics import step_regression_metrics
 
 
 class ControllerTrainer:
-    def __init__(self, model, loss_fn, optimizer: torch.optim.Optimizer, device: str = "cpu", logger=None, scheduler=None):
+    def __init__(
+        self,
+        model,
+        loss_fn,
+        optimizer: torch.optim.Optimizer,
+        device: str = "cpu",
+        logger=None,
+        scheduler=None,
+        gradient_clip_norm: float | None = None,
+    ):
         self.device = torch.device(device)
         self.model = model
         self.loss_fn = loss_fn.to(self.device) if hasattr(loss_fn, "to") else loss_fn
         self.optimizer = optimizer
         self.logger = logger
         self.scheduler = scheduler
+        self.gradient_clip_norm = gradient_clip_norm
         self._validate_parameter_devices()
 
     def _is_on_target_device(self, tensor: torch.Tensor) -> bool:
@@ -53,6 +63,8 @@ class ControllerTrainer:
             loss, step_loss, restart_loss = self.loss_fn(ds_pred, ds_expert, p_restart, y_restart)
             self.optimizer.zero_grad()
             loss.backward()
+            if self.gradient_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip_norm)
             self.optimizer.step()
             totals["loss"] += float(loss.item())
             totals["step_loss"] += float(step_loss.item())
@@ -166,6 +178,7 @@ class ControllerTrainer:
                         {
                             "model_state_dict": self.model.state_dict(),
                             "optimizer_state_dict": self.optimizer.state_dict(),
+                            "model_config": self.model.get_config() if hasattr(self.model, "get_config") else None,
                             "epoch": epoch,
                             "val_loss": best_val,
                         },
@@ -174,6 +187,10 @@ class ControllerTrainer:
             else:
                 patience += 1
             if patience >= early_stop_patience:
+                print(
+                    f"Early stopping at epoch {epoch + 1}: "
+                    f"validation loss did not improve for {early_stop_patience} epochs."
+                )
                 break
         if best_state is not None:
             self.model.load_state_dict(best_state)

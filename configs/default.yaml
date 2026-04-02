@@ -15,20 +15,25 @@ tracker:
   restart_drift_threshold: 1.0e-4
 
 controller:
-  hidden_dims: [64, 64]
-  dropout: 0.1
+  hidden_dims: [128, 128, 64]
+  dropout: 0.05
   norm_type: layernorm
+  activation: silu
+  head_hidden_dim: 64
   step_size_min: 1.0e-4
   step_size_max: 0.1
 
 training:
   batch_size: 128
-  learning_rate: 1.0e-3
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-5
   epochs: 100
   lambda_step: 1.0
-  lambda_restart: 5.0
-  alpha_restart: 0.9
-  focal_gamma: 2.0
+  lambda_restart: 3.0
+  alpha_restart: 0.75
+  focal_gamma: 1.5
+  gradient_clip_norm: 1.0
   noise_std: 0.01
   scheduler_factor: 0.5
-  scheduler_patience: 5
+  scheduler_patience: 8
+  early_stop_patience: 15

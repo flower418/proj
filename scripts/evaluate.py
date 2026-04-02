@@ -13,7 +13,7 @@ from src.core.contour_tracker import ContourTracker
 from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.data.dataset import PseudospectrumDataset
-from src.nn.controller import NNController
+from src.nn.controller import build_controller_from_checkpoint
 from src.train.data_generator import ExpertDataGenerator, ExpertDataset
 from src.train.trainer import ControllerTrainer
 from src.nn.loss import ControllerLoss
@@ -51,14 +51,8 @@ def main():
         max_iter=config["solver"]["max_iter"],
     )
 
-    controller = NNController(
-        hidden_dims=config["controller"]["hidden_dims"],
-        dropout=config["controller"]["dropout"],
-        norm_type=config["controller"]["norm_type"],
-        step_size_min=config["controller"]["step_size_min"],
-        step_size_max=config["controller"]["step_size_max"],
-    )
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    controller = build_controller_from_checkpoint(checkpoint, config["controller"], input_dim=7)
     controller.load_state_dict(checkpoint["model_state_dict"])
     controller = controller.to(device)
     controller.eval()

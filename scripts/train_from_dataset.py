@@ -9,7 +9,7 @@ import torch
 import _bootstrap  # noqa: F401
 
 from src.data.dataset import create_dataloaders
-from src.nn.controller import NNController
+from src.nn.controller import build_controller
 from src.nn.loss import ControllerLoss
 from src.train.logger import TrainingLogger
 from src.train.trainer import ControllerTrainer
@@ -24,8 +24,25 @@ def parse_args():
     parser.add_argument("--experiment-name", type=str, default="model")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--checkpoint-dir", type=str, default="models")
+    parser.add_argument("--log-dir", type=str, default="logs")
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--hidden-dims", type=int, nargs="+", default=None)
+    parser.add_argument("--dropout", type=float, default=None)
+    parser.add_argument("--norm-type", choices=["layernorm", "batchnorm"], default=None)
+    parser.add_argument("--activation", choices=["relu", "gelu", "silu"], default=None)
+    parser.add_argument("--head-hidden-dim", type=int, default=None)
+    parser.add_argument("--step-size-min", type=float, default=None)
+    parser.add_argument("--step-size-max", type=float, default=None)
+    parser.add_argument("--lambda-step", type=float, default=None)
+    parser.add_argument("--lambda-restart", type=float, default=None)
+    parser.add_argument("--alpha-restart", type=float, default=None)
+    parser.add_argument("--focal-gamma", type=float, default=None)
+    parser.add_argument("--early-stop-patience", type=int, default=None)
+    parser.add_argument("--gradient-clip-norm", type=float, default=None)
     return parser.parse_args()
 
 
@@ -33,7 +50,38 @@ def main():
     args = parse_args()
     config = load_yaml_config(args.config)
     train_cfg = load_yaml_config(args.training_config, validate=False).get("defaults", {})
+    controller_cfg = dict(config["controller"])
+    if args.hidden_dims is not None:
+        controller_cfg["hidden_dims"] = args.hidden_dims
+    if args.dropout is not None:
+        controller_cfg["dropout"] = args.dropout
+    if args.norm_type is not None:
+        controller_cfg["norm_type"] = args.norm_type
+    if args.activation is not None:
+        controller_cfg["activation"] = args.activation
+    if args.head_hidden_dim is not None:
+        controller_cfg["head_hidden_dim"] = args.head_hidden_dim
+    if args.step_size_min is not None:
+        controller_cfg["step_size_min"] = args.step_size_min
+    if args.step_size_max is not None:
+        controller_cfg["step_size_max"] = args.step_size_max
+
+    training_cfg = dict(config["training"])
+    if args.lambda_step is not None:
+        training_cfg["lambda_step"] = args.lambda_step
+    if args.lambda_restart is not None:
+        training_cfg["lambda_restart"] = args.lambda_restart
+    if args.alpha_restart is not None:
+        training_cfg["alpha_restart"] = args.alpha_restart
+    if args.focal_gamma is not None:
+        training_cfg["focal_gamma"] = args.focal_gamma
+    if args.gradient_clip_norm is not None:
+        training_cfg["gradient_clip_norm"] = args.gradient_clip_norm
     batch_size = args.batch_size if args.batch_size is not None else train_cfg.get("batch_size", config["training"]["batch_size"])
+    learning_rate = args.learning_rate if args.learning_rate is not None else train_cfg.get("learning_rate", training_cfg["learning_rate"])
+    weight_decay = args.weight_decay if args.weight_decay is not None else train_cfg.get("weight_decay", training_cfg.get("weight_decay", 0.0))
+    early_stop_patience = args.early_stop_patience if args.early_stop_patience is not None else train_cfg.get("early_stop_patience", training_cfg.get("early_stop_patience", 10))
+    gradient_clip_norm = training_cfg.get("gradient_clip_norm")
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("请求使用 CUDA 训练，但当前 PyTorch 未检测到可用 GPU。")
@@ -42,34 +90,28 @@ def main():
     train_loader, val_loader, test_loader = create_dataloaders(
         args.data_dir,
         batch_size=batch_size,
-        num_workers=4,
+        num_workers=args.num_workers,
     )
 
     print(f"Train batches: {len(train_loader)}")
     print(f"Val batches: {len(val_loader)}")
 
     # 创建模型
-    model = NNController(
-        input_dim=7,
-        hidden_dims=config["controller"]["hidden_dims"],
-        dropout=config["controller"]["dropout"],
-        norm_type=config["controller"]["norm_type"],
-        step_size_min=config["controller"]["step_size_min"],
-        step_size_max=config["controller"]["step_size_max"],
-    ).to(device)
+    model = build_controller(controller_cfg, input_dim=7).to(device)
 
     # 损失函数
     loss_fn = ControllerLoss(
-        lambda_step=config["training"]["lambda_step"],
-        lambda_restart=config["training"]["lambda_restart"],
-        alpha_restart=config["training"]["alpha_restart"],
-        focal_gamma=config["training"]["focal_gamma"],
+        lambda_step=training_cfg["lambda_step"],
+        lambda_restart=training_cfg["lambda_restart"],
+        alpha_restart=training_cfg["alpha_restart"],
+        focal_gamma=training_cfg["focal_gamma"],
     )
 
     # 优化器
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=train_cfg.get("learning_rate", config["training"]["learning_rate"])
+        lr=learning_rate,
+        weight_decay=weight_decay,
     )
 
     # 学习率调度器
@@ -81,10 +123,18 @@ def main():
     )
 
     # 日志
-    logger = TrainingLogger(log_dir="logs", experiment_name=args.experiment_name)
+    logger = TrainingLogger(log_dir=args.log_dir, experiment_name=args.experiment_name)
     logger.save_config({
         "config": config,
         "training_config": train_cfg,
+        "effective_controller_config": controller_cfg,
+        "effective_training_config": {
+            **training_cfg,
+            "learning_rate": learning_rate,
+            "weight_decay": weight_decay,
+            "batch_size": batch_size,
+            "early_stop_patience": early_stop_patience,
+        },
         "args": vars(args),
     })
     if len(train_loader) > 0:
@@ -99,6 +149,7 @@ def main():
         device=device,
         logger=logger,
         scheduler=scheduler,
+        gradient_clip_norm=gradient_clip_norm,
     )
 
     # 训练
@@ -108,7 +159,7 @@ def main():
         train_loader=train_loader,
         val_loader=val_loader,
         epochs=epochs,
-        early_stop_patience=train_cfg.get("early_stop_patience", 10),
+        early_stop_patience=early_stop_patience,
         checkpoint_dir=str(experiment_dir),
     )
     if not history:

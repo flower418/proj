@@ -10,7 +10,7 @@ import torch
 import _bootstrap  # noqa: F401
 
 from src.core.pseudoinverse import PseudoinverseSolver
-from src.nn.controller import NNController
+from src.nn.controller import build_controller
 from src.nn.loss import ControllerLoss
 from src.train.data_generator import ExpertDataGenerator, ExpertDataset
 from src.train.logger import TrainingLogger
@@ -71,21 +71,18 @@ def main():
     train_dataset = torch.utils.data.Subset(dataset, range(split))
     val_dataset = torch.utils.data.Subset(dataset, range(split, len(dataset)))
 
-    model = NNController(
-        input_dim=7,
-        hidden_dims=config["controller"]["hidden_dims"],
-        dropout=config["controller"]["dropout"],
-        norm_type=config["controller"]["norm_type"],
-        step_size_min=config["controller"]["step_size_min"],
-        step_size_max=config["controller"]["step_size_max"],
-    ).to(device)
+    model = build_controller(config["controller"], input_dim=7).to(device)
     loss_fn = ControllerLoss(
         lambda_step=config["training"]["lambda_step"],
         lambda_restart=config["training"]["lambda_restart"],
         alpha_restart=config["training"]["alpha_restart"],
         focal_gamma=config["training"]["focal_gamma"],
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.get("learning_rate", config["training"]["learning_rate"]))
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=train_cfg.get("learning_rate", config["training"]["learning_rate"]),
+        weight_decay=config["training"].get("weight_decay", 0.0),
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
@@ -102,6 +99,7 @@ def main():
         device=device,
         logger=logger,
         scheduler=scheduler,
+        gradient_clip_norm=config["training"].get("gradient_clip_norm"),
     )
     experiment_dir = Path(args.checkpoint_dir) / (args.experiment_name or "default_run")
     history = trainer.train(

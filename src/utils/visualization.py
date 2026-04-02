@@ -105,7 +105,7 @@ def plot_trajectory(
             zorder=4,
             label="Tracked Contour",
         )
-        plt.colorbar(line_collection, ax=ax, label="Step size")
+        plt.colorbar(line_collection, ax=ax, label="Step size", fraction=0.046, pad=0.03, shrink=0.9)
     else:
         ax.plot(np.real(traj_array), np.imag(traj_array), color="tab:blue", linewidth=2.6, alpha=0.95, label="Tracked Contour", zorder=4)
 
@@ -129,10 +129,29 @@ def plot_trajectory(
 
     ax.set_xlabel("Re(z)")
     ax.set_ylabel("Im(z)")
-    ax.set_title(title or (f"Pseudospectrum Contour (epsilon={epsilon})" if epsilon is not None else "Pseudospectrum Contour"))
+    ax.set_title(
+        title or (f"Pseudospectrum Contour (epsilon={epsilon})" if epsilon is not None else "Pseudospectrum Contour"),
+        fontsize=11,
+        pad=16,
+        loc="left",
+        wrap=True,
+    )
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(
+            handles,
+            labels,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=min(len(handles), 4),
+            frameon=True,
+            fontsize=9,
+            handlelength=1.8,
+            columnspacing=1.2,
+        )
     ax.set_aspect("equal")
+    ax.figure.tight_layout()
 
     if save_path is not None:
         path = Path(save_path)
