@@ -225,13 +225,15 @@ def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict 
     n = len(records)
     indices = np.random.permutation(n)
     train_end, val_end = int(0.8 * n), int(0.9 * n)
+    split_payload = {
+        "train_indices": indices[:train_end],
+        "val_indices": indices[train_end:val_end],
+        "test_indices": indices[val_end:],
+    }
 
-    np.savez(
-        output_path / f"{name}_splits.npz",
-        train_indices=indices[:train_end],
-        val_indices=indices[train_end:val_end],
-        test_indices=indices[val_end:],
-    )
+    np.savez(output_path / f"{name}_splits.npz", **split_payload)
+    if name == "dataset_full":
+        np.savez(output_path / "dataset_splits.npz", **split_payload)
 
     if stats:
         with open(output_path / "dataset_stats.json", "w") as f:

@@ -41,6 +41,9 @@ def parse_args():
 def main():
     args = parse_args()
     config = load_yaml_config(args.config)
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("请求使用 CUDA 评估，但当前 PyTorch 未检测到可用 GPU。")
     solver = PseudoinverseSolver(
         method=config["solver"]["method"],
         tol=config["solver"]["tol"],
@@ -56,6 +59,7 @@ def main():
     )
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     controller.load_state_dict(checkpoint["model_state_dict"])
+    controller = controller.to(device)
     controller.eval()
 
     trainer = ControllerTrainer(
@@ -67,7 +71,7 @@ def main():
             focal_gamma=config["training"]["focal_gamma"],
         ),
         optimizer=torch.optim.Adam(controller.parameters(), lr=config["training"]["learning_rate"]),
-        device=args.device,
+        device=device,
         logger=None,
         scheduler=None,
     )

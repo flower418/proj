@@ -18,8 +18,25 @@ def ensure_dataset_splits(
     """Ensure dataset_splits.npz exists; create a default split if missing."""
     data_path = Path(data_dir)
     splits_path = data_path / "dataset_splits.npz"
+    legacy_splits_path = data_path / "dataset_full_splits.npz"
     if splits_path.exists():
         return np.load(splits_path)
+    if legacy_splits_path.exists():
+        with np.load(legacy_splits_path) as legacy_splits:
+            train_indices = legacy_splits["train_indices"]
+            val_indices = legacy_splits["val_indices"]
+            test_indices = legacy_splits["test_indices"]
+        np.savez(
+            splits_path,
+            train_indices=train_indices,
+            val_indices=val_indices,
+            test_indices=test_indices,
+        )
+        return {
+            "train_indices": train_indices,
+            "val_indices": val_indices,
+            "test_indices": test_indices,
+        }
 
     if total_samples is None:
         data = np.load(data_path / "dataset_full.npz")
@@ -94,14 +111,15 @@ def create_dataloaders(
     num_workers: int = 4,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """创建 train/val/test 数据加载器"""
+    pin_memory = torch.cuda.is_available()
     train = PseudospectrumDataset(data_dir, "train")
     val = PseudospectrumDataset(data_dir, "val")
     test = PseudospectrumDataset(data_dir, "test")
 
     return (
-        DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True),
-        DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True),
-        DataLoader(test, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True),
+        DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory),
+        DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory),
+        DataLoader(test, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory),
     )
 
 

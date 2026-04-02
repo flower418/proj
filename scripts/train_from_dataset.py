@@ -22,8 +22,8 @@ def parse_args():
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--training-config", default="configs/training.yaml")
     parser.add_argument("--experiment-name", type=str, default="model")
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--checkpoint-dir", type=str, default="models")
     return parser.parse_args()
@@ -33,11 +33,15 @@ def main():
     args = parse_args()
     config = load_yaml_config(args.config)
     train_cfg = load_yaml_config(args.training_config, validate=False).get("defaults", {})
+    batch_size = args.batch_size if args.batch_size is not None else train_cfg.get("batch_size", config["training"]["batch_size"])
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("请求使用 CUDA 训练，但当前 PyTorch 未检测到可用 GPU。")
 
     # 加载数据
     train_loader, val_loader, test_loader = create_dataloaders(
         args.data_dir,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         num_workers=4,
     )
 
@@ -52,7 +56,7 @@ def main():
         norm_type=config["controller"]["norm_type"],
         step_size_min=config["controller"]["step_size_min"],
         step_size_max=config["controller"]["step_size_max"],
-    )
+    ).to(device)
 
     # 损失函数
     loss_fn = ControllerLoss(
@@ -83,21 +87,22 @@ def main():
         "training_config": train_cfg,
         "args": vars(args),
     })
-    sample_batch = next(iter(train_loader))
-    logger.log_feature_distribution(sample_batch["features"].cpu().numpy(), epoch=0)
+    if len(train_loader) > 0:
+        sample_batch = next(iter(train_loader))
+        logger.log_feature_distribution(sample_batch["features"].cpu().numpy(), epoch=0)
 
     # 训练器
     trainer = ControllerTrainer(
         model=model,
         loss_fn=loss_fn,
         optimizer=optimizer,
-        device=args.device,
+        device=device,
         logger=logger,
         scheduler=scheduler,
     )
 
     # 训练
-    epochs = train_cfg.get("epochs", args.epochs)
+    epochs = args.epochs if args.epochs is not None else train_cfg.get("epochs", config["training"]["epochs"])
     experiment_dir = Path(args.checkpoint_dir) / args.experiment_name
     history = trainer.train(
         train_loader=train_loader,
@@ -106,6 +111,8 @@ def main():
         early_stop_patience=train_cfg.get("early_stop_patience", 10),
         checkpoint_dir=str(experiment_dir),
     )
+    if not history:
+        raise RuntimeError("训练未运行任何 epoch，请检查 epochs 和数据集划分。")
 
     # 保存训练历史
     history_path = experiment_dir / "training_history.json"

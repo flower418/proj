@@ -38,6 +38,9 @@ def main():
     args = parse_args()
     config = load_yaml_config(args.config)
     train_cfg = load_yaml_config(args.training_config, validate=False).get("defaults", {})
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("请求使用 CUDA 训练，但当前 PyTorch 未检测到可用 GPU。")
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -73,7 +76,7 @@ def main():
         norm_type=config["controller"]["norm_type"],
         step_size_min=config["controller"]["step_size_min"],
         step_size_max=config["controller"]["step_size_max"],
-    )
+    ).to(device)
     loss_fn = ControllerLoss(
         lambda_step=config["training"]["lambda_step"],
         lambda_restart=config["training"]["lambda_restart"],
@@ -94,19 +97,21 @@ def main():
         model=model,
         loss_fn=loss_fn,
         optimizer=optimizer,
-        device=args.device,
+        device=device,
         logger=logger,
         scheduler=scheduler,
     )
     experiment_dir = Path(args.checkpoint_dir) / (args.experiment_name or "default_run")
     history = trainer.train(
-        train_dataset,
-        val_dataset,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
         epochs=train_cfg.get("epochs", config["training"]["epochs"]),
         early_stop_patience=train_cfg.get("early_stop_patience", 10),
         batch_size=train_cfg.get("batch_size", config["training"]["batch_size"]),
         checkpoint_dir=str(experiment_dir),
     )
+    if not history:
+        raise RuntimeError("训练未运行任何 epoch，请检查 epochs 和数据集划分。")
 
     data_out = Path(args.data_out)
     data_out.parent.mkdir(parents=True, exist_ok=True)

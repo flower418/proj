@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -13,12 +14,32 @@ from src.utils.metrics import step_regression_metrics
 
 class ControllerTrainer:
     def __init__(self, model, loss_fn, optimizer: torch.optim.Optimizer, device: str = "cpu", logger=None, scheduler=None):
-        self.model = model.to(device)
-        self.loss_fn = loss_fn
+        self.device = torch.device(device)
+        self.model = model
+        self.loss_fn = loss_fn.to(self.device) if hasattr(loss_fn, "to") else loss_fn
         self.optimizer = optimizer
-        self.device = device
         self.logger = logger
         self.scheduler = scheduler
+        self._validate_parameter_devices()
+
+    def _is_on_target_device(self, tensor: torch.Tensor) -> bool:
+        if tensor.device.type != self.device.type:
+            return False
+        if self.device.index is None:
+            return True
+        return tensor.device.index == self.device.index
+
+    def _validate_parameter_devices(self) -> None:
+        model_params = list(self.model.parameters())
+        if model_params and any(not self._is_on_target_device(param) for param in model_params):
+            raise ValueError(
+                f"Model parameters must already be on {self.device} before creating ControllerTrainer."
+            )
+        optimizer_params = [param for group in self.optimizer.param_groups for param in group["params"]]
+        if optimizer_params and any(not self._is_on_target_device(param) for param in optimizer_params):
+            raise ValueError(
+                f"Optimizer parameters must be created from model parameters on {self.device}."
+            )
 
     def train_epoch(self, dataloader: DataLoader) -> Dict[str, float]:
         self.model.train()
@@ -72,6 +93,7 @@ class ControllerTrainer:
         ds_pred = np.concatenate(all_ds_pred)
         ds_true = np.concatenate(all_ds_true)
         y_pred = (y_prob >= 0.5).astype(np.int64)
+        keep_mask = y_true < 0.5
         metrics.update(
             {
                 "accuracy": float(accuracy_score(y_true, y_pred)),
@@ -80,7 +102,7 @@ class ControllerTrainer:
                 "f1": float(f1_score(y_true, y_pred, zero_division=0)),
             }
         )
-        metrics.update(step_regression_metrics(ds_true, ds_pred))
+        metrics.update(step_regression_metrics(ds_true[keep_mask], ds_pred[keep_mask]))
         metrics["_raw"] = {"y_true": y_true, "y_prob": y_prob, "ds_pred": ds_pred, "ds_true": ds_true}
         return metrics
 
@@ -102,6 +124,8 @@ class ControllerTrainer:
             val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
         history = []
         best_val = float("inf")
+        best_state = None
+        best_raw = None
         patience = 0
         checkpoint_path = None if checkpoint_dir is None else Path(checkpoint_dir)
         if checkpoint_path is not None:
@@ -133,6 +157,9 @@ class ControllerTrainer:
                     self.scheduler.step()
             if val_metrics["loss"] < best_val:
                 best_val = val_metrics["loss"]
+                best_state = copy.deepcopy(self.model.state_dict())
+                if raw is not None:
+                    best_raw = {key: np.copy(value) for key, value in raw.items()}
                 patience = 0
                 if checkpoint_path is not None:
                     torch.save(
@@ -148,6 +175,11 @@ class ControllerTrainer:
                 patience += 1
             if patience >= early_stop_patience:
                 break
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
         if self.logger is not None:
+            if best_raw is not None:
+                self.logger.log_confusion_matrix(best_raw["y_true"], (best_raw["y_prob"] >= 0.5).astype(np.int64), len(history))
+                self.logger.log_prediction_scatter(best_raw["ds_pred"], best_raw["ds_true"], len(history))
             self.logger.log_learning_curves()
         return history

@@ -20,7 +20,7 @@ from src.utils.visualization import plot_trajectory
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate a random matrix, choose a random contour start z0, define epsilon from z0, and run full tracking."
+        description="Generate a random matrix, sample a random complex-plane point, define epsilon from that point, and track the full contour with NN + ODE."
     )
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--checkpoint", required=True, help="Path to the trained controller checkpoint.")
@@ -30,6 +30,12 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument("--max-attempts", type=int, default=32, help="Retry with new random matrix/start until a closed contour is found.")
+    parser.add_argument(
+        "--point-sampler",
+        choices=["spectral_box", "around_eigenvalue"],
+        default="spectral_box",
+        help="How to sample the random complex-plane point used to define the contour.",
+    )
     parser.add_argument(
         "--sample-mode",
         choices=["trained_epsilon", "point_sigma"],
@@ -48,7 +54,13 @@ def parse_args():
         nargs=2,
         default=(0.15, 0.35),
         metavar=("R_MIN", "R_MAX"),
-        help="Random radius range as a fraction of spectral scale around a random eigenvalue.",
+        help="Only used with --point-sampler around_eigenvalue. Random radius range as a fraction of spectral scale around a random eigenvalue.",
+    )
+    parser.add_argument(
+        "--box-padding",
+        type=float,
+        default=0.25,
+        help="Only used with --point-sampler spectral_box. Padding ratio applied to the eigenvalue bounding box before sampling a random point.",
     )
     parser.add_argument("--print-every", type=int, default=1, help="Print NN decisions every k tracking steps.")
     parser.add_argument("--quiet", action="store_true", help="Disable step-by-step console diagnostics.")
@@ -67,7 +79,11 @@ def generate_random_matrix(n: int, matrix_type: str, rng: np.random.Generator) -
     raise ValueError(f"Unsupported matrix type: {matrix_type}")
 
 
-def choose_random_start(A: np.ndarray, rng: np.random.Generator, radius_range: tuple[float, float]) -> tuple[complex, complex]:
+def choose_point_around_random_eigenvalue(
+    A: np.ndarray,
+    rng: np.random.Generator,
+    radius_range: tuple[float, float],
+) -> tuple[complex, complex]:
     eigvals = np.linalg.eigvals(np.asarray(A, dtype=np.complex128))
     anchor = complex(eigvals[int(rng.integers(len(eigvals)))])
     spectral_scale = max(np.ptp(np.real(eigvals)), np.ptp(np.imag(eigvals)), 1.0)
@@ -78,6 +94,28 @@ def choose_random_start(A: np.ndarray, rng: np.random.Generator, radius_range: t
     angle = rng.uniform(0.0, 2.0 * np.pi)
     z0 = anchor + radius * np.exp(1j * angle)
     return z0, anchor
+
+
+def choose_point_in_spectral_box(
+    A: np.ndarray,
+    rng: np.random.Generator,
+    padding: float,
+) -> tuple[complex, complex]:
+    eigvals = np.linalg.eigvals(np.asarray(A, dtype=np.complex128))
+    x_min = float(np.min(np.real(eigvals)))
+    x_max = float(np.max(np.real(eigvals)))
+    y_min = float(np.min(np.imag(eigvals)))
+    y_max = float(np.max(np.imag(eigvals)))
+    x_span = max(x_max - x_min, 1.0)
+    y_span = max(y_max - y_min, 1.0)
+    x_pad = max(float(padding), 0.0) * x_span
+    y_pad = max(float(padding), 0.0) * y_span
+    z_random = complex(
+        rng.uniform(x_min - x_pad, x_max + x_pad),
+        rng.uniform(y_min - y_pad, y_max + y_pad),
+    )
+    nearest = complex(eigvals[int(np.argmin(np.abs(eigvals - z_random)))])
+    return z_random, nearest
 
 
 class DemoController:
@@ -171,13 +209,16 @@ def main():
     best_attempt = None
     for attempt_idx in range(args.max_attempts):
         A = generate_random_matrix(args.matrix_size, args.matrix_type, rng).astype(np.complex128)
-        z_guess, anchor = choose_random_start(A, rng, tuple(args.radius_range))
+        if args.point_sampler == "spectral_box":
+            z_random, anchor = choose_point_in_spectral_box(A, rng, padding=args.box_padding)
+        else:
+            z_random, anchor = choose_point_around_random_eigenvalue(A, rng, tuple(args.radius_range))
         try:
             if args.sample_mode == "trained_epsilon":
-                z0, epsilon = project_to_contour(A, target_epsilon, z_guess)
+                z0, epsilon = project_to_contour(A, target_epsilon, z_random)
                 epsilon = float(sigma_min_at(A, z0))
             else:
-                z0 = z_guess
+                z0 = z_random
                 epsilon = float(sigma_min_at(A, z0))
         except ValueError:
             continue
@@ -195,8 +236,9 @@ def main():
             print(
                 f"attempt={attempt_idx + 1}/{args.max_attempts} "
                 f"epsilon={epsilon:.6f} "
-                f"z0={_format_complex(z0)} "
-                f"anchor={_format_complex(anchor)}"
+                f"random_point={_format_complex(z_random)} "
+                f"start_point={_format_complex(z0)} "
+                f"nearest_eig={_format_complex(anchor)}"
             )
         best_local = None
         for multiplier in budget_multipliers:
@@ -222,7 +264,7 @@ def main():
                 "step_budget": step_budget,
                 "A": A,
                 "z0": z0,
-                "z_guess": z_guess,
+                "z_random": z_random,
                 "anchor": anchor,
                 "epsilon": epsilon,
                 "result": result,
@@ -293,7 +335,7 @@ def main():
 
     A = best_attempt["A"]
     z0 = best_attempt["z0"]
-    z_guess = best_attempt["z_guess"]
+    z_random = best_attempt["z_random"]
     anchor = best_attempt["anchor"]
     epsilon = float(best_attempt["epsilon"])
     result = best_attempt["result"]
@@ -310,21 +352,24 @@ def main():
     )
 
     summary = {
+        "algorithm": "nn_plus_ode",
         "checkpoint": args.checkpoint,
         "matrix_path": str(matrix_out),
         "plot_path": str(plot_out),
         "matrix_size": args.matrix_size,
         "matrix_type": args.matrix_type,
         "seed": args.seed,
+        "point_sampler": args.point_sampler,
         "sample_mode": args.sample_mode,
         "attempt_index": int(best_attempt["attempt_index"]),
         "max_attempts": int(args.max_attempts),
         "step_budget_used": int(best_attempt["step_budget"]),
         "min_step_size": float(min_step_size),
         "epsilon": float(epsilon),
-        "z_guess": [float(np.real(z_guess)), float(np.imag(z_guess))],
-        "z0": [float(np.real(z0)), float(np.imag(z0))],
-        "anchor_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
+        "random_point": [float(np.real(z_random)), float(np.imag(z_random))],
+        "sigma_at_random_point": float(sigma_min_at(A, z_random)),
+        "start_point": [float(np.real(z0)), float(np.imag(z0))],
+        "nearest_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
         "tracked_points": int(len(result["trajectory"])),
         "num_restarts": int(len(result["restart_indices"])),
         "closure_error": float(np.abs(result["trajectory"][-1] - result["trajectory"][0])),
