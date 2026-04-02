@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument("--matrix-size", type=int, default=20)
     parser.add_argument("--matrix-type", choices=["complex", "real", "hermitian"], default="complex")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-steps", type=int, default=200)
+    parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--max-attempts", type=int, default=32, help="Retry with new random matrix/start until a closed contour is found.")
     parser.add_argument(
         "--point-sampler",
@@ -201,9 +201,14 @@ def main():
         max_iter=config["solver"]["max_iter"],
     )
     base_controller = load_controller(args.checkpoint, config)
-    min_step_size = float(args.min_step_size if args.min_step_size is not None else config["ode"]["initial_step_size"])
+    min_step_size = float(
+        args.min_step_size
+        if args.min_step_size is not None
+        else config["controller"]["step_size_min"]
+    )
     controller = DemoController(base_controller, min_step_size=min_step_size)
     target_epsilon = float(config["ode"]["epsilon"])
+    base_step_budget = int(args.max_steps if args.max_steps is not None else config["tracker"]["max_steps"])
     budget_multipliers = [1, 2, 4, 8]
 
     best_attempt = None
@@ -242,7 +247,7 @@ def main():
             )
         best_local = None
         for multiplier in budget_multipliers:
-            step_budget = int(max(args.max_steps * multiplier, 64))
+            step_budget = int(max(base_step_budget * multiplier, 64))
             if not args.quiet:
                 print(f"  step_budget={step_budget}")
             result = tracker.track(

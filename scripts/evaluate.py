@@ -17,6 +17,7 @@ from src.nn.controller import NNController
 from src.train.data_generator import ExpertDataGenerator, ExpertDataset
 from src.train.trainer import ControllerTrainer
 from src.nn.loss import ControllerLoss
+from src.utils.contour_init import project_to_contour
 from src.utils.metrics import contour_closure_error
 from src.utils.config import load_yaml_config
 
@@ -92,6 +93,8 @@ def main():
     else:
         np.random.seed(args.seed)
         A = np.random.randn(args.matrix_size, args.matrix_size) + 1j * np.random.randn(args.matrix_size, args.matrix_size)
+        z_guess = complex(args.z0_real, args.z0_imag)
+        z0, _ = project_to_contour(A, config["ode"]["epsilon"], z_guess)
         generator = ExpertDataGenerator(
             A=A,
             epsilon=config["ode"]["epsilon"],
@@ -103,7 +106,7 @@ def main():
             closure_tol=config["tracker"]["closure_tol"],
             solver=solver,
         )
-        records = generator.generate_trajectory(complex(args.z0_real, args.z0_imag), max_steps=args.max_steps)
+        records = generator.generate_trajectory(z0, max_steps=args.max_steps)
         dataset = ExpertDataset(records)
         dataloader = torch.utils.data.DataLoader(
             dataset,
@@ -120,7 +123,7 @@ def main():
             fixed_step_size=config["ode"]["initial_step_size"],
             closure_tol=config["tracker"]["closure_tol"],
         )
-        tracking_result = tracker.track(z0=complex(args.z0_real, args.z0_imag), max_steps=args.max_steps)
+        tracking_result = tracker.track(z0=z0, max_steps=args.max_steps)
         metrics["closure_error"] = contour_closure_error(tracking_result["trajectory"])
         metrics["num_restarts"] = len(tracking_result["restart_indices"])
         metrics["evaluation_mode"] = "synthetic_matrix"

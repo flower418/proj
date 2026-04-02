@@ -201,7 +201,7 @@ def generate_diverse_dataset(
 
                         # 定期保存
                         if len(all_records) % save_every == 0:
-                            save_dataset(all_records, output_path, f"partial_{len(all_records)}")
+                            save_dataset(all_records, output_path, f"partial_{len(all_records)}", rng=rng)
                             print(f"    已保存 {len(all_records)} 样本")
 
                     except Exception as e:
@@ -209,11 +209,11 @@ def generate_diverse_dataset(
                         continue
 
     # 最终保存
-    save_dataset(all_records, output_path, "dataset_full", stats)
+    save_dataset(all_records, output_path, "dataset_full", stats, rng=rng)
     return stats
 
 
-def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict = None):
+def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict = None, rng: np.random.Generator | None = None):
     """保存数据集"""
     features = np.stack([r["features"] for r in records])
     ds_expert = np.array([r["ds_expert"] for r in records], dtype=np.float32)
@@ -223,7 +223,8 @@ def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict 
 
     # 保存划分
     n = len(records)
-    indices = np.random.permutation(n)
+    rng = rng or np.random.default_rng(0)
+    indices = rng.permutation(n)
     train_end, val_end = int(0.8 * n), int(0.9 * n)
     split_payload = {
         "train_indices": indices[:train_end],

@@ -10,7 +10,7 @@ solver:
   max_iter: 500
 
 tracker:
-  max_steps: 1000
+  max_steps: 4000
   closure_tol: 1.0e-3
   restart_drift_threshold: 1.0e-4
 

@@ -1,158 +1,171 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
-from typing import Dict, Tuple
 
 import numpy as np
-import torch
-from torch.utils.data import Dataset, DataLoader
+
+try:
+    import torch
+    from torch.utils.data import DataLoader, Dataset
+except ModuleNotFoundError:  # pragma: no cover - exercised only in minimal environments
+    torch = None
+    DataLoader = None
+
+    class Dataset:  # type: ignore[override]
+        pass
 
 
-def ensure_dataset_splits(
-    data_dir: str | Path,
-    total_samples: int | None = None,
-    train_ratio: float = 0.8,
-    val_ratio: float = 0.1,
-    seed: int = 0,
-):
-    """Ensure dataset_splits.npz exists; create a default split if missing."""
-    data_path = Path(data_dir)
-    splits_path = data_path / "dataset_splits.npz"
-    legacy_splits_path = data_path / "dataset_full_splits.npz"
-    if splits_path.exists():
-        return np.load(splits_path)
-    if legacy_splits_path.exists():
-        with np.load(legacy_splits_path) as legacy_splits:
-            train_indices = legacy_splits["train_indices"]
-            val_indices = legacy_splits["val_indices"]
-            test_indices = legacy_splits["test_indices"]
-        np.savez(
-            splits_path,
-            train_indices=train_indices,
-            val_indices=val_indices,
-            test_indices=test_indices,
-        )
-        return {
-            "train_indices": train_indices,
-            "val_indices": val_indices,
-            "test_indices": test_indices,
-        }
+def _resolve_dataset_base(data_dir: str | Path, dataset_name: str | None = None) -> tuple[Path, Path]:
+    root = Path(data_dir)
+    if not root.exists():
+        raise FileNotFoundError(f"Data directory does not exist: {root}")
 
-    if total_samples is None:
-        data = np.load(data_path / "dataset_full.npz")
-        total_samples = int(data["features"].shape[0])
+    if dataset_name is not None:
+        data_path = root / f"{dataset_name}.npz"
+        split_path = root / f"{dataset_name}_splits.npz"
+        if not data_path.exists():
+            raise FileNotFoundError(f"Dataset file not found: {data_path}")
+        if not split_path.exists():
+            raise FileNotFoundError(f"Split file not found: {split_path}")
+        return data_path, split_path
 
-    rng = np.random.default_rng(seed)
-    indices = np.arange(total_samples, dtype=np.int64)
-    rng.shuffle(indices)
+    preferred = root / "dataset_full.npz"
+    preferred_splits = root / "dataset_full_splits.npz"
+    if preferred.exists() and preferred_splits.exists():
+        return preferred, preferred_splits
 
-    train_end = int(train_ratio * total_samples)
-    val_end = train_end + int(val_ratio * total_samples)
-    train_indices = indices[:train_end]
-    val_indices = indices[train_end:val_end]
-    test_indices = indices[val_end:]
-
-    np.savez(
-        splits_path,
-        train_indices=train_indices,
-        val_indices=val_indices,
-        test_indices=test_indices,
+    candidates = sorted(
+        path
+        for path in root.glob("*.npz")
+        if not path.name.endswith("_splits.npz")
     )
-    return {
-        "train_indices": train_indices,
-        "val_indices": val_indices,
-        "test_indices": test_indices,
-    }
+    if not candidates:
+        raise FileNotFoundError(f"No dataset .npz files found under {root}")
+
+    for candidate in reversed(candidates):
+        split_path = candidate.with_name(f"{candidate.stem}_splits.npz")
+        if split_path.exists():
+            return candidate, split_path
+
+    raise FileNotFoundError(
+        f"Found dataset files under {root}, but none has a matching *_splits.npz file."
+    )
 
 
 class PseudospectrumDataset(Dataset):
-    """伪谱数据集"""
+    def __init__(self, data_dir: str | Path, split: str = "train", dataset_name: str | None = None):
+        if split not in {"train", "val", "test", "all"}:
+            raise ValueError("split must be one of: train, val, test, all")
 
-    def __init__(self, data_dir: str, split: str = "train"):
-        """
-        :param data_dir: 数据集目录
-        :param split: train / val / test
-        """
-        data_path = Path(data_dir)
+        data_path, split_path = _resolve_dataset_base(data_dir, dataset_name=dataset_name)
+        data = np.load(data_path)
+        features = np.asarray(data["features"], dtype=np.float32)
+        ds_expert = np.asarray(data["ds_expert"], dtype=np.float32)
+        y_restart = np.asarray(data["y_restart"], dtype=np.float32)
 
-        # 加载数据
-        data = np.load(data_path / "dataset_full.npz")
-        splits = ensure_dataset_splits(data_path, total_samples=int(data["features"].shape[0]))
+        if not (len(features) == len(ds_expert) == len(y_restart)):
+            raise ValueError("Dataset arrays features, ds_expert, y_restart must have the same length.")
 
-        self.features = data["features"]
-        self.ds_expert = data["ds_expert"]
-        self.y_restart = data["y_restart"]
-
-        # 获取索引
-        if split == "train":
-            self.indices = splits["train_indices"]
-        elif split == "val":
-            self.indices = splits["val_indices"]
+        if split == "all":
+            indices = np.arange(len(features), dtype=np.int64)
         else:
-            self.indices = splits["test_indices"]
+            splits = np.load(split_path)
+            split_key = f"{split}_indices"
+            if split_key not in splits:
+                raise KeyError(f"Split file {split_path} does not contain {split_key}.")
+            indices = np.asarray(splits[split_key], dtype=np.int64)
 
-        print(f"{split}: {len(self.indices):,} samples")
+        self.data_path = data_path
+        self.split_path = split_path
+        self.split = split
+        self.indices = indices
+        self.features = features[indices]
+        self.ds_expert = ds_expert[indices]
+        self.y_restart = y_restart[indices]
 
     def __len__(self) -> int:
-        return len(self.indices)
+        return int(len(self.indices))
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        i = self.indices[idx]
+    def __getitem__(self, idx: int):
+        if torch is None:
+            raise RuntimeError("torch is required to materialize dataset samples.")
         return {
-            "features": torch.tensor(self.features[i], dtype=torch.float32),
-            "ds_expert": torch.tensor(self.ds_expert[i], dtype=torch.float32),
-            "y_restart": torch.tensor(self.y_restart[i], dtype=torch.float32),
+            "features": torch.tensor(self.features[idx], dtype=torch.float32),
+            "ds_expert": torch.tensor(self.ds_expert[idx], dtype=torch.float32),
+            "y_restart": torch.tensor(self.y_restart[idx], dtype=torch.float32),
         }
 
 
 def create_dataloaders(
-    data_dir: str,
-    batch_size: int = 128,
-    num_workers: int = 4,
-) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """创建 train/val/test 数据加载器"""
-    pin_memory = torch.cuda.is_available()
-    train = PseudospectrumDataset(data_dir, "train")
-    val = PseudospectrumDataset(data_dir, "val")
-    test = PseudospectrumDataset(data_dir, "test")
+    data_dir: str | Path,
+    batch_size: int,
+    num_workers: int = 0,
+    dataset_name: str | None = None,
+    pin_memory: bool | None = None,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    if torch is None or DataLoader is None:
+        raise RuntimeError("torch is required to create dataloaders.")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
 
-    return (
-        DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory),
-        DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory),
-        DataLoader(test, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory),
-    )
+    if pin_memory is None:
+        pin_memory = bool(torch.cuda.is_available())
+
+    train_dataset = PseudospectrumDataset(data_dir, split="train", dataset_name=dataset_name)
+    val_dataset = PseudospectrumDataset(data_dir, split="val", dataset_name=dataset_name)
+    test_dataset = PseudospectrumDataset(data_dir, split="test", dataset_name=dataset_name)
+
+    loader_kwargs = {
+        "batch_size": int(batch_size),
+        "num_workers": int(num_workers),
+        "pin_memory": pin_memory,
+    }
+    train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test_dataset, shuffle=False, **loader_kwargs)
+    return train_loader, val_loader, test_loader
 
 
-def analyze_dataset(data_dir: str):
-    """分析数据集"""
-    data_path = Path(data_dir)
+def inspect_dataset(data_dir: str | Path, dataset_name: str | None = None) -> dict:
+    data_path, split_path = _resolve_dataset_base(data_dir, dataset_name=dataset_name)
+    data = np.load(data_path)
+    splits = np.load(split_path)
 
-    # 加载统计
-    stats_file = data_path / "dataset_stats.json"
-    if stats_file.exists():
-        import json
-        with open(stats_file) as f:
-            stats = json.load(f)
-        print(f"\n总样本：{stats['total_samples']:,}")
-        print(f"重启样本：{stats['restart_samples']:,} ({100*stats['restart_samples']/stats['total_samples']:.2f}%)")
+    features = np.asarray(data["features"], dtype=np.float32)
+    ds_expert = np.asarray(data["ds_expert"], dtype=np.float32)
+    y_restart = np.asarray(data["y_restart"], dtype=np.float32)
 
-    data = np.load(data_path / "dataset_full.npz")
-    total_samples = int(data["features"].shape[0])
-    restart_samples = int(np.sum(data["y_restart"]))
-    if not stats_file.exists():
-        print(f"\n总样本：{total_samples:,}")
-        print(f"重启样本：{restart_samples:,} ({100*restart_samples/max(total_samples, 1):.2f}%)")
+    summary = {
+        "data_file": str(data_path),
+        "split_file": str(split_path),
+        "num_samples": int(len(features)),
+        "feature_dim": int(features.shape[1]) if features.ndim == 2 else None,
+        "restart_ratio": float(np.mean(y_restart)) if len(y_restart) > 0 else 0.0,
+        "step_size_min": float(np.min(ds_expert)) if len(ds_expert) > 0 else 0.0,
+        "step_size_max": float(np.max(ds_expert)) if len(ds_expert) > 0 else 0.0,
+        "split_sizes": {
+            "train": int(len(splits["train_indices"])),
+            "val": int(len(splits["val_indices"])),
+            "test": int(len(splits["test_indices"])),
+        },
+    }
+    return summary
 
-    # 加载或自动创建划分
-    splits = ensure_dataset_splits(data_path, total_samples=total_samples)
-    print(f"\nTrain: {len(splits['train_indices']):,}")
-    print(f"Val: {len(splits['val_indices']):,}")
-    print(f"Test: {len(splits['test_indices']):,}")
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Inspect a generated pseudospectrum dataset.")
+    parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--dataset-name", default=None)
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    summary = inspect_dataset(args.data_dir, dataset_name=args.dataset_name)
+    for key, value in summary.items():
+        print(f"{key}: {value}")
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", type=str, required=True)
-    args = parser.parse_args()
-    analyze_dataset(args.data_dir)
+    main()

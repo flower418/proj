@@ -10,6 +10,7 @@ import _bootstrap  # noqa: F401
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.train.data_generator import ExpertDataGenerator
 from src.utils.config import load_yaml_config
+from src.utils.contour_init import project_to_contour
 
 
 def parse_args():
@@ -45,7 +46,8 @@ def main():
         closure_tol=config["tracker"]["closure_tol"],
         solver=solver,
     )
-    z0 = complex(args.z0_real, args.z0_imag)
+    z0_guess = complex(args.z0_real, args.z0_imag)
+    z0, _ = project_to_contour(A, config["ode"]["epsilon"], z0_guess)
     records = generator.generate_trajectory(z0=z0, max_steps=args.max_steps)
     records.extend(generator.add_state_perturbations(records, noise_std=config["training"]["noise_std"]))
     output = Path(args.output)

@@ -16,6 +16,7 @@ from src.train.data_generator import ExpertDataGenerator, ExpertDataset
 from src.train.logger import TrainingLogger
 from src.train.trainer import ControllerTrainer
 from src.utils.config import load_yaml_config
+from src.utils.contour_init import project_to_contour
 
 
 def parse_args():
@@ -45,7 +46,7 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     A = np.random.randn(args.matrix_size, args.matrix_size) + 1j * np.random.randn(args.matrix_size, args.matrix_size)
-    z0 = complex(args.z0_real, args.z0_imag)
+    z0_guess = complex(args.z0_real, args.z0_imag)
     solver = PseudoinverseSolver(
         method=config["solver"]["method"],
         tol=config["solver"]["tol"],
@@ -62,6 +63,7 @@ def main():
         closure_tol=config["tracker"]["closure_tol"],
         solver=solver,
     )
+    z0, _ = project_to_contour(A, config["ode"]["epsilon"], z0_guess)
     records = generator.generate_trajectory(z0=z0, max_steps=args.max_steps)
     records.extend(generator.add_state_perturbations(records, noise_std=config["training"]["noise_std"]))
     dataset = ExpertDataset(records)

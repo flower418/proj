@@ -78,3 +78,25 @@ def test_restart_step_advances_trajectory():
     result = tracker.track(z0=z0, max_steps=2)
     assert len(result["restart_indices"]) >= 1
     assert np.abs(result["trajectory"][1] - result["trajectory"][0]) > 0.0
+
+
+def test_tracker_closes_from_point_sigma_start():
+    rng = np.random.default_rng(3)
+    A = rng.standard_normal((6, 6)) + 1j * rng.standard_normal((6, 6))
+    eigvals = np.linalg.eigvals(A)
+    anchor = eigvals[int(rng.integers(len(eigvals)))]
+    spectral_scale = max(np.ptp(np.real(eigvals)), np.ptp(np.imag(eigvals)), 1.0)
+    z0 = anchor + 0.22 * spectral_scale * np.exp(1j * rng.uniform(0.0, 2.0 * np.pi))
+    epsilon, _, _ = smallest_singular_triplet(A, z0)
+
+    tracker = ContourTracker(
+        A=A,
+        epsilon=epsilon,
+        ode_system=ManifoldODE(A, epsilon),
+        fixed_step_size=1e-2,
+    )
+    result = tracker.track(z0=z0, max_steps=1500)
+
+    assert result["closed"]
+    assert abs(result["trajectory"][-1] - result["trajectory"][0]) < 5e-3
+    assert abs(result["winding_angle"]) > 2.0 * np.pi - 0.1

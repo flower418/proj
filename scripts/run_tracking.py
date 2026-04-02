@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--matrix-size", type=int, default=12, help="Only used together with --demo-random.")
     parser.add_argument("--demo-random", action="store_true", help="Use a random demo matrix instead of a supplied matrix.")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-steps", type=int, default=100)
+    parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--plot-out", default=None)
     parser.add_argument("--result-out", default=None, help="Optional .json summary output.")
@@ -65,6 +65,7 @@ def main():
     args = parse_args()
     config = load_yaml_config(args.config)
     epsilon = float(args.epsilon if args.epsilon is not None else config["ode"]["epsilon"])
+    max_steps = int(args.max_steps if args.max_steps is not None else config["tracker"]["max_steps"])
     if args.matrix_path is None and not args.demo_random:
         raise ValueError("Provide --matrix-path for real inference, or use --demo-random for a toy random-matrix demo.")
     np.random.seed(args.seed)
@@ -118,7 +119,7 @@ def main():
         fixed_step_size=config["ode"]["initial_step_size"],
         closure_tol=config["tracker"]["closure_tol"],
     )
-    result = tracker.track(z0=z0, max_steps=args.max_steps)
+    result = tracker.track(z0=z0, max_steps=max_steps)
     closure_error = float(np.abs(result["trajectory"][-1] - result["trajectory"][0]))
     if args.plot_out is not None:
         plot_path = Path(args.plot_out)
@@ -141,6 +142,7 @@ def main():
         "max_distance_from_start": float(result.get("max_distance_from_start", 0.0)),
         "winding_angle": float(result.get("winding_angle", 0.0)),
         "epsilon": epsilon,
+        "max_steps": max_steps,
         "start_mode": start_mode,
         "input_point": None if z_input is None else [float(np.real(z_input)), float(np.imag(z_input))],
         "projected_start_point": [float(np.real(result["trajectory"][0])), float(np.imag(result["trajectory"][0]))],
