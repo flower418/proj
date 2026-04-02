@@ -20,6 +20,7 @@ from src.utils.config import load_yaml_config
 from src.utils.contour_compare import contour_distance_metrics, resample_curve_by_arclength
 from src.utils.contour_init import project_to_contour, sigma_min_at
 from src.utils.demo_sampling import generate_random_matrix, sample_random_point
+from src.utils.visualization import plot_trajectory
 from src.utils.visualization import plot_pseudospectrum_background
 
 
@@ -121,6 +122,9 @@ def save_comparison_plot(
     nn_result: dict,
     baseline_result: dict,
     reference_result: dict | None,
+    nn_elapsed: float,
+    baseline_elapsed: float,
+    reference_elapsed: float | None,
     save_path: Path,
 ) -> None:
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -152,8 +156,61 @@ def save_comparison_plot(
     ax.set_title(f"NN + ODE vs Newton Predictor-Corrector (epsilon={epsilon:.4g})", loc="left", fontsize=11, pad=14)
     ax.grid(True, alpha=0.3)
     ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=3, fontsize=9, frameon=True)
+    time_lines = [
+        f"NN + ODE: {nn_elapsed:.3f}s",
+        f"Newton PC: {baseline_elapsed:.3f}s",
+    ]
+    if reference_elapsed is not None:
+        time_lines.append(f"Reference: {reference_elapsed:.3f}s")
+    ax.text(
+        0.02,
+        0.98,
+        "\n".join(time_lines),
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=9,
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.85, "edgecolor": "0.7"},
+        zorder=10,
+    )
     ax.set_aspect("equal")
     fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_single_method_plot(
+    A: np.ndarray,
+    epsilon: float,
+    trajectory: np.ndarray,
+    restart_indices: list[int],
+    step_sizes: np.ndarray | list[float],
+    title: str,
+    elapsed_seconds: float,
+    save_path: Path,
+) -> None:
+    fig, ax = plt.subplots(figsize=(10, 8))
+    plot_trajectory(
+        trajectory=np.asarray(trajectory, dtype=np.complex128),
+        restart_indices=restart_indices,
+        step_sizes=np.asarray(step_sizes, dtype=np.float64) if len(step_sizes) > 0 else None,
+        A=A,
+        epsilon=epsilon,
+        ax=ax,
+        title=title,
+    )
+    ax.text(
+        0.02,
+        0.98,
+        f"Time: {elapsed_seconds:.3f}s",
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=9,
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.85, "edgecolor": "0.7"},
+        zorder=10,
+    )
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=160, bbox_inches="tight")
     plt.close(fig)
@@ -289,6 +346,8 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     matrix_out = output_dir / "random_matrix.npy"
     plot_out = output_dir / "comparison_plot.png"
+    nn_plot_out = output_dir / "nn_only_plot.png"
+    baseline_plot_out = output_dir / "newton_only_plot.png"
     summary_out = output_dir / "comparison_summary.json"
     traj_out = output_dir / "trajectories.npz"
 
@@ -306,7 +365,30 @@ def main():
         nn_result=nn_result,
         baseline_result=baseline_result,
         reference_result=reference_result,
+        nn_elapsed=nn_elapsed,
+        baseline_elapsed=baseline_elapsed,
+        reference_elapsed=reference_elapsed if reference_result is not None else None,
         save_path=plot_out,
+    )
+    save_single_method_plot(
+        A=A,
+        epsilon=epsilon,
+        trajectory=np.asarray(nn_result["trajectory"], dtype=np.complex128),
+        restart_indices=list(nn_result.get("restart_indices", [])),
+        step_sizes=np.asarray(nn_result.get("step_sizes", []), dtype=np.float64),
+        title=f"NN + ODE Contour (epsilon={epsilon:.4g})",
+        elapsed_seconds=nn_elapsed,
+        save_path=nn_plot_out,
+    )
+    save_single_method_plot(
+        A=A,
+        epsilon=epsilon,
+        trajectory=np.asarray(baseline_result["trajectory"], dtype=np.complex128),
+        restart_indices=[],
+        step_sizes=np.asarray(baseline_result.get("step_sizes", []), dtype=np.float64),
+        title=f"Newton Predictor-Corrector Contour (epsilon={epsilon:.4g})",
+        elapsed_seconds=baseline_elapsed,
+        save_path=baseline_plot_out,
     )
 
     summary = {
@@ -314,6 +396,8 @@ def main():
         "checkpoint": args.checkpoint,
         "matrix_path": str(matrix_out),
         "plot_path": str(plot_out),
+        "nn_plot_path": str(nn_plot_out),
+        "baseline_plot_path": str(baseline_plot_out),
         "trajectories_path": str(traj_out),
         "matrix_size": args.matrix_size,
         "matrix_type": args.matrix_type,
