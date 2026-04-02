@@ -40,6 +40,10 @@ def extract_features(
         f6 = np.abs(delta)
 
     f7 = float(prev_solver_iters)
+    matrix_scale = np.linalg.norm(np.asarray(A, dtype=np.complex128), ord="fro") / max(np.sqrt(float(n)), 1.0)
+    f8 = np.abs(float(epsilon))
+    f9 = float(matrix_scale)
+    f10 = np.abs(z) / max(float(matrix_scale), 1e-12)
     if normalize:
         features = np.array(
             [
@@ -50,8 +54,11 @@ def extract_features(
                 _log_normalize(f5, min_exp=-6.0, max_exp=0.0),
                 float(np.clip(f6 / np.pi, 0.0, 1.0)),
                 float(np.clip(f7 / max(max_iter_scale, 1), 0.0, 1.0)),
+                _log_normalize(f8, min_exp=-12.0, max_exp=2.0),
+                _log_normalize(f9, min_exp=-6.0, max_exp=3.0),
+                _log_normalize(f10, min_exp=-6.0, max_exp=3.0),
             ],
             dtype=np.float32,
         )
         return features
-    return np.array([f1, f2, f3, f4, f5, f6, f7], dtype=np.float32)
+    return np.array([f1, f2, f3, f4, f5, f6, f7, f8, f9, f10], dtype=np.float32)
