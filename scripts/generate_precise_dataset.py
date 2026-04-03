@@ -125,6 +125,9 @@ def parse_args():
     parser.add_argument("--max-step-size", type=float, default=1e-1)
     parser.add_argument("--noise-std", type=float, default=0.01)
     parser.add_argument("--max-attempts-per-trajectory", type=int, default=8)
+    parser.add_argument("--status-every", type=int, default=20, help="Print a running status summary every this many trajectory attempts.")
+    parser.add_argument("--epsilon-min", type=float, default=None, help="Optional lower bound for accepted epsilon.")
+    parser.add_argument("--epsilon-max", type=float, default=None, help="Optional upper bound for accepted epsilon.")
     parser.add_argument("--allow-open-trajectories", action="store_true")
     return parser.parse_args()
 
@@ -139,6 +142,8 @@ def main():
     trajectory_meta: list[dict[str, Any]] = []
     trajectory_id = 0
     matrix_counter = 0
+    total_attempts = 0
+    last_save_count = 0
     pairings = [(matrix_type, int(n)) for matrix_type in args.matrix_types for n in args.matrix_sizes]
 
     stats: dict[str, Any] = {
@@ -159,8 +164,33 @@ def main():
         "epsilon_mean": 0.0,
         "matrix_type_counts": {matrix_type: 0 for matrix_type in args.matrix_types},
         "matrix_size_counts": {str(n): 0 for n in args.matrix_sizes},
+        "attempts_total": 0,
+        "attempts_projection_failed": 0,
+        "attempts_epsilon_filtered": 0,
+        "attempts_empty_trajectory": 0,
+        "attempts_open_trajectory": 0,
+        "attempts_generation_failed": 0,
     }
     epsilon_values: list[float] = []
+
+    print(
+        json.dumps(
+            {
+                "stage": "dataset_generation_started",
+                "target_samples": args.target_samples,
+                "matrix_sizes": args.matrix_sizes,
+                "matrix_types": args.matrix_types,
+                "sample_mode": args.sample_mode,
+                "point_samplers": args.point_samplers,
+                "max_steps": args.max_steps,
+                "dagger_factor": args.dagger_factor,
+                "output_dir": str(output_dir),
+                "status_every": args.status_every,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
 
     while len(records) < args.target_samples:
         matrix_type, n = pairings[matrix_counter % len(pairings)]
@@ -170,6 +200,22 @@ def main():
         A = build_matrix(matrix_type=matrix_type, n=n, seed=matrix_seed).astype(np.complex128)
         solver = PseudoinverseSolver(method="minres", tol=args.solver_tol, max_iter=1000)
 
+        print(
+            json.dumps(
+                {
+                    "stage": "matrix_started",
+                    "matrix_index": matrix_counter,
+                    "matrix_seed": matrix_seed,
+                    "matrix_type": matrix_type,
+                    "matrix_size": n,
+                    "samples_collected": len(records),
+                    "trajectories_collected": trajectory_id,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+
         for local_traj_idx in range(args.trajectories_per_type):
             if len(records) >= args.target_samples:
                 break
@@ -177,6 +223,8 @@ def main():
             accepted_records = None
             accepted_meta = None
             for attempt_idx in range(args.max_attempts_per_trajectory):
+                total_attempts += 1
+                stats["attempts_total"] = int(total_attempts)
                 sampler = str(args.point_samplers[(trajectory_id + attempt_idx) % len(args.point_samplers)])
                 z_random, anchor = sample_random_point(
                     A=A,
@@ -189,28 +237,58 @@ def main():
                     try:
                         z0, epsilon = project_to_contour(A, args.epsilon_value, z_random)
                     except ValueError:
+                        stats["attempts_projection_failed"] += 1
                         continue
                     epsilon = float(sigma_min_at(A, z0))
                 else:
                     z0 = complex(z_random)
                     epsilon = float(sigma_min_at(A, z0))
 
-                generator = ExpertDataGenerator(
-                    A=A,
-                    epsilon=epsilon,
-                    expert_tol=args.expert_rtol,
-                    atol=args.expert_atol,
-                    drift_threshold=args.drift_threshold,
-                    base_step_size=args.base_step_size,
-                    max_step_size=args.max_step_size,
-                    closure_tol=args.closure_tol,
-                    solver=solver,
+                if args.epsilon_min is not None and epsilon < args.epsilon_min:
+                    stats["attempts_epsilon_filtered"] += 1
+                    continue
+                if args.epsilon_max is not None and epsilon > args.epsilon_max:
+                    stats["attempts_epsilon_filtered"] += 1
+                    continue
+
+                print(
+                    json.dumps(
+                        {
+                            "stage": "attempt_started",
+                            "attempts_total": total_attempts,
+                            "trajectory_slot": trajectory_id,
+                            "matrix_type": matrix_type,
+                            "matrix_size": n,
+                            "point_sampler": sampler,
+                            "epsilon": float(epsilon),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
                 )
-                trajectory = generator.generate_trajectory(z0=z0, max_steps=args.max_steps)
+
+                try:
+                    generator = ExpertDataGenerator(
+                        A=A,
+                        epsilon=epsilon,
+                        expert_tol=args.expert_rtol,
+                        atol=args.expert_atol,
+                        drift_threshold=args.drift_threshold,
+                        base_step_size=args.base_step_size,
+                        max_step_size=args.max_step_size,
+                        closure_tol=args.closure_tol,
+                        solver=solver,
+                    )
+                    trajectory = generator.generate_trajectory(z0=z0, max_steps=args.max_steps)
+                except Exception:
+                    stats["attempts_generation_failed"] += 1
+                    continue
                 if not trajectory:
+                    stats["attempts_empty_trajectory"] += 1
                     continue
                 closed = trajectory_closed(trajectory, z0=z0, closure_tol=args.closure_tol)
                 if not closed and not args.allow_open_trajectories:
+                    stats["attempts_open_trajectory"] += 1
                     continue
 
                 augmented = generator.add_state_perturbations(
@@ -249,6 +327,43 @@ def main():
                 break
 
             if accepted_records is None or accepted_meta is None:
+                print(
+                    json.dumps(
+                        {
+                            "stage": "attempt_rejected",
+                            "attempts_total": total_attempts,
+                            "matrix_type": matrix_type,
+                            "matrix_size": n,
+                            "reasons": {
+                                "projection_failed": stats["attempts_projection_failed"],
+                                "epsilon_filtered": stats["attempts_epsilon_filtered"],
+                                "empty_trajectory": stats["attempts_empty_trajectory"],
+                                "open_trajectory": stats["attempts_open_trajectory"],
+                                "generation_failed": stats["attempts_generation_failed"],
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+                if args.status_every > 0 and total_attempts % args.status_every == 0:
+                    print(
+                        json.dumps(
+                            {
+                                "stage": "status",
+                                "samples_collected": len(records),
+                                "trajectories_collected": trajectory_id,
+                                "attempts_total": total_attempts,
+                                "projection_failed": stats["attempts_projection_failed"],
+                                "epsilon_filtered": stats["attempts_epsilon_filtered"],
+                                "empty_trajectory": stats["attempts_empty_trajectory"],
+                                "open_trajectory": stats["attempts_open_trajectory"],
+                                "generation_failed": stats["attempts_generation_failed"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
                 continue
 
             records.extend(accepted_records)
@@ -268,19 +383,62 @@ def main():
                 stats["feature_dim"] = int(np.asarray(accepted_records[0]["features"]).shape[-1])
 
             print(
-                f"[traj {trajectory_id:05d}] type={matrix_type} n={n} "
-                f"sampler={accepted_meta['point_sampler']} epsilon={accepted_meta['epsilon']:.4e} "
-                f"closed={int(accepted_meta['closed'])} samples={len(accepted_records)} total={len(records)}"
+                json.dumps(
+                    {
+                        "stage": "trajectory_accepted",
+                        "trajectory_id": trajectory_id,
+                        "matrix_type": matrix_type,
+                        "matrix_size": n,
+                        "point_sampler": accepted_meta["point_sampler"],
+                        "epsilon": accepted_meta["epsilon"],
+                        "closed": accepted_meta["closed"],
+                        "saved_samples": len(accepted_records),
+                        "samples_collected": len(records),
+                        "attempts_total": total_attempts,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
             )
 
-            if len(records) % args.save_every == 0:
+            if args.status_every > 0 and total_attempts % args.status_every == 0:
+                print(
+                    json.dumps(
+                        {
+                            "stage": "status",
+                            "samples_collected": len(records),
+                            "trajectories_collected": trajectory_id,
+                            "attempts_total": total_attempts,
+                            "projection_failed": stats["attempts_projection_failed"],
+                            "epsilon_filtered": stats["attempts_epsilon_filtered"],
+                            "empty_trajectory": stats["attempts_empty_trajectory"],
+                            "open_trajectory": stats["attempts_open_trajectory"],
+                            "generation_failed": stats["attempts_generation_failed"],
+                        },
+                        ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+
+            if len(records) - last_save_count >= args.save_every:
                 stats["num_samples"] = int(len(records))
                 if epsilon_values:
                     stats["epsilon_min"] = float(np.min(epsilon_values))
                     stats["epsilon_max"] = float(np.max(epsilon_values))
                     stats["epsilon_mean"] = float(np.mean(epsilon_values))
                 save_dataset(output_dir, f"partial_{len(records)}", records, trajectory_meta, stats, rng)
-                print(f"Saved partial dataset with {len(records)} samples to {output_dir}")
+                last_save_count = len(records)
+                print(
+                    json.dumps(
+                        {
+                            "stage": "partial_saved",
+                            "samples_collected": len(records),
+                            "output_dir": str(output_dir),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
 
     stats["num_samples"] = int(len(records))
     if epsilon_values:
@@ -289,7 +447,7 @@ def main():
         stats["epsilon_mean"] = float(np.mean(epsilon_values))
 
     save_dataset(output_dir, "dataset_full", records, trajectory_meta, stats, rng)
-    print(json.dumps(stats, indent=2, ensure_ascii=False))
+    print(json.dumps(stats, indent=2, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":
