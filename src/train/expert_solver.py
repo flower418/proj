@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -173,7 +174,13 @@ class ExpertSolver:
             y_restart=0,
         )
 
-    def generate_expert_trajectory(self, z0: complex, max_steps: int = 500) -> List[Dict]:
+    def generate_expert_trajectory(
+        self,
+        z0: complex,
+        max_steps: int = 500,
+        step_callback=None,
+        max_wall_seconds: float | None = None,
+    ) -> List[Dict]:
         _, u, v = self.svd_solver(self.A, z0)
         u = u / max(np.linalg.norm(u), 1e-15)
         v = v / max(np.linalg.norm(v), 1e-15)
@@ -181,29 +188,35 @@ class ExpertSolver:
         steps_since_restart = 0
         step_hint = self.first_step
         trajectory = []
+        start_time = time.perf_counter()
 
         for step_idx in range(max_steps):
             result = self._step_with_hint(z, u, v, steps_since_restart=steps_since_restart, first_step_hint=step_hint)
-            trajectory.append(
-                {
-                    "z": z,
-                    "u": u.copy(),
-                    "v": v.copy(),
-                    "z_next": result.z_next,
-                    "u_next": result.u_next.copy(),
-                    "v_next": result.v_next.copy(),
-                    "ds_expert": result.ds_expert,
-                    "y_restart": result.y_restart,
-                    "restart_reason": result.restart_reason,
-                    "residual": result.residual,
-                    "sigma_error": result.sigma_error,
-                    "gamma": result.gamma,
-                    "step": step_idx,
-                }
-            )
+            elapsed_seconds = float(time.perf_counter() - start_time)
+            record = {
+                "z": z,
+                "u": u.copy(),
+                "v": v.copy(),
+                "z_next": result.z_next,
+                "u_next": result.u_next.copy(),
+                "v_next": result.v_next.copy(),
+                "ds_expert": result.ds_expert,
+                "y_restart": result.y_restart,
+                "restart_reason": result.restart_reason,
+                "residual": result.residual,
+                "sigma_error": result.sigma_error,
+                "gamma": result.gamma,
+                "step": step_idx,
+                "elapsed_seconds": elapsed_seconds,
+            }
+            trajectory.append(record)
+            if step_callback is not None:
+                step_callback(record)
             z, u, v = result.z_next, result.u_next, result.v_next
             steps_since_restart = 0 if result.y_restart else steps_since_restart + 1
             step_hint = self.first_step if result.y_restart else max(min(result.ds_expert, self.max_step), 1e-8)
             if step_idx >= 10 and abs(z - z0) < self.closure_tol:
+                break
+            if max_wall_seconds is not None and elapsed_seconds >= float(max_wall_seconds):
                 break
         return trajectory

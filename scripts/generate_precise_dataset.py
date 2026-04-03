@@ -126,6 +126,8 @@ def parse_args():
     parser.add_argument("--noise-std", type=float, default=0.01)
     parser.add_argument("--max-attempts-per-trajectory", type=int, default=8)
     parser.add_argument("--status-every", type=int, default=20, help="Print a running status summary every this many trajectory attempts.")
+    parser.add_argument("--trajectory-heartbeat-every", type=int, default=100, help="Print a heartbeat every this many teacher steps inside one trajectory.")
+    parser.add_argument("--max-wall-seconds-per-trajectory", type=float, default=120.0, help="Abort a single teacher trajectory attempt after this many seconds. Set <= 0 to disable.")
     parser.add_argument("--epsilon-min", type=float, default=None, help="Optional lower bound for accepted epsilon.")
     parser.add_argument("--epsilon-max", type=float, default=None, help="Optional upper bound for accepted epsilon.")
     parser.add_argument("--allow-open-trajectories", action="store_true")
@@ -267,6 +269,29 @@ def main():
                     flush=True,
                 )
 
+                def _trajectory_step_callback(record: dict[str, Any]) -> None:
+                    heartbeat_every = max(int(args.trajectory_heartbeat_every), 1)
+                    step_idx = int(record["step"])
+                    if step_idx == 0 or ((step_idx + 1) % heartbeat_every == 0):
+                        print(
+                            json.dumps(
+                                {
+                                    "stage": "trajectory_step",
+                                    "attempts_total": total_attempts,
+                                    "matrix_type": matrix_type,
+                                    "matrix_size": n,
+                                    "step": step_idx,
+                                    "elapsed_seconds": float(record.get("elapsed_seconds", 0.0)),
+                                    "ds_expert": float(record["ds_expert"]),
+                                    "y_restart": int(record["y_restart"]),
+                                    "sigma_error": float(record["sigma_error"]),
+                                    "residual": float(record["residual"]),
+                                },
+                                ensure_ascii=False,
+                            ),
+                            flush=True,
+                        )
+
                 try:
                     generator = ExpertDataGenerator(
                         A=A,
@@ -279,12 +304,42 @@ def main():
                         closure_tol=args.closure_tol,
                         solver=solver,
                     )
-                    trajectory = generator.generate_trajectory(z0=z0, max_steps=args.max_steps)
+                    trajectory = generator.generate_trajectory(
+                        z0=z0,
+                        max_steps=args.max_steps,
+                        step_callback=_trajectory_step_callback,
+                        max_wall_seconds=(
+                            None
+                            if args.max_wall_seconds_per_trajectory is None or args.max_wall_seconds_per_trajectory <= 0
+                            else float(args.max_wall_seconds_per_trajectory)
+                        ),
+                    )
                 except Exception:
                     stats["attempts_generation_failed"] += 1
                     continue
                 if not trajectory:
                     stats["attempts_empty_trajectory"] += 1
+                    continue
+                if (
+                    args.max_wall_seconds_per_trajectory is not None
+                    and args.max_wall_seconds_per_trajectory > 0
+                    and float(trajectory[-1].get("elapsed_seconds", 0.0)) >= float(args.max_wall_seconds_per_trajectory)
+                ):
+                    stats["attempts_generation_failed"] += 1
+                    print(
+                        json.dumps(
+                            {
+                                "stage": "trajectory_timeout",
+                                "attempts_total": total_attempts,
+                                "matrix_type": matrix_type,
+                                "matrix_size": n,
+                                "elapsed_seconds": float(trajectory[-1].get("elapsed_seconds", 0.0)),
+                                "steps_completed": int(len(trajectory)),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
                     continue
                 closed = trajectory_closed(trajectory, z0=z0, closure_tol=args.closure_tol)
                 if not closed and not args.allow_open_trajectories:

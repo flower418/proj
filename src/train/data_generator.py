@@ -41,8 +41,19 @@ class ExpertDataGenerator:
         )
         self.augmenter = DAggerAugmenter(self.expert)
 
-    def generate_trajectory(self, z0: complex, max_steps: int = 500) -> List[Dict]:
-        trajectory = self.expert.generate_expert_trajectory(z0=z0, max_steps=max_steps)
+    def generate_trajectory(
+        self,
+        z0: complex,
+        max_steps: int = 500,
+        step_callback=None,
+        max_wall_seconds: float | None = None,
+    ) -> List[Dict]:
+        trajectory = self.expert.generate_expert_trajectory(
+            z0=z0,
+            max_steps=max_steps,
+            step_callback=step_callback,
+            max_wall_seconds=max_wall_seconds,
+        )
         records = []
         for idx, point in enumerate(trajectory):
             prev_gamma_arg = None if idx == 0 else float(np.angle(np.vdot(trajectory[idx - 1]["u"], trajectory[idx - 1]["v"])))
