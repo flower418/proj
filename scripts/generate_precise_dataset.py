@@ -115,9 +115,20 @@ def save_dataset(
             fh.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
+def evenly_subsample_records(records: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        raise ValueError("limit must be positive.")
+    if len(records) <= limit:
+        return records
+    stride = len(records) / float(limit)
+    indices = [min(int(i * stride), len(records) - 1) for i in range(limit)]
+    return [records[idx] for idx in indices]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate a precise contour-tracking dataset aligned with the random-point point_sigma task.")
     parser.add_argument("--target-samples", type=int, default=50000)
+    parser.add_argument("--target-trajectories", type=int, default=None, help="Optional lower bound on the number of accepted full contours.")
     parser.add_argument("--matrix-sizes", type=int, nargs="+", default=[20, 30, 50])
     parser.add_argument("--matrix-types", type=str, nargs="+", default=["complex", "real", "hermitian", "ill_conditioned"])
     parser.add_argument("--trajectories-per-type", type=int, default=4, help="How many random contours to sample per matrix before moving to the next matrix.")
@@ -140,6 +151,7 @@ def parse_args():
     parser.add_argument("--max-step-size", type=float, default=1e-1)
     parser.add_argument("--noise-std", type=float, default=0.01)
     parser.add_argument("--max-attempts-per-trajectory", type=int, default=8)
+    parser.add_argument("--max-samples-per-trajectory", type=int, default=None, help="Optional cap on how many saved samples a single accepted contour can contribute.")
     parser.add_argument("--status-every", type=int, default=20, help="Print a running status summary every this many trajectory attempts.")
     parser.add_argument("--trajectory-heartbeat-every", type=int, default=100, help="Print a heartbeat every this many teacher steps inside one trajectory.")
     parser.add_argument("--max-wall-seconds-per-trajectory", type=float, default=120.0, help="Abort a single teacher trajectory attempt after this many seconds. Set <= 0 to disable.")
@@ -155,6 +167,11 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     wall_start = time.perf_counter()
 
+    if args.target_samples is None and args.target_trajectories is None:
+        raise ValueError("At least one of --target-samples or --target-trajectories must be specified.")
+    if args.max_samples_per_trajectory is not None and args.max_samples_per_trajectory <= 0:
+        raise ValueError("--max-samples-per-trajectory must be positive when provided.")
+
     rng = np.random.default_rng(args.seed)
     records: list[dict[str, Any]] = []
     trajectory_meta: list[dict[str, Any]] = []
@@ -169,6 +186,7 @@ def main():
         "sample_mode": args.sample_mode,
         "point_samplers": list(args.point_samplers),
         "target_samples": int(args.target_samples),
+        "target_trajectories": None if args.target_trajectories is None else int(args.target_trajectories),
         "max_steps": int(args.max_steps),
         "dagger_factor": int(args.dagger_factor),
         "feature_dim": None,
@@ -191,11 +209,28 @@ def main():
     }
     epsilon_values: list[float] = []
 
+    def generation_complete() -> bool:
+        sample_done = len(records) >= int(args.target_samples)
+        if args.target_trajectories is None:
+            return sample_done
+        trajectory_done = trajectory_id >= int(args.target_trajectories)
+        return sample_done and trajectory_done
+
     def progress_fields() -> dict[str, Any]:
         elapsed_seconds = float(time.perf_counter() - wall_start)
         samples_collected = int(len(records))
         samples_remaining = int(max(args.target_samples - samples_collected, 0))
         progress_pct = float(100.0 * samples_collected / max(int(args.target_samples), 1))
+        trajectories_remaining = (
+            None
+            if args.target_trajectories is None
+            else int(max(int(args.target_trajectories) - trajectory_id, 0))
+        )
+        trajectory_progress_pct = (
+            None
+            if args.target_trajectories is None
+            else float(100.0 * trajectory_id / max(int(args.target_trajectories), 1))
+        )
         samples_per_second = float(samples_collected / elapsed_seconds) if elapsed_seconds > 1e-12 else 0.0
         eta_seconds = (
             float(samples_remaining / samples_per_second)
@@ -217,7 +252,10 @@ def main():
             "samples_collected": samples_collected,
             "samples_remaining": samples_remaining,
             "progress_pct": progress_pct,
+            "target_trajectories": None if args.target_trajectories is None else int(args.target_trajectories),
             "trajectories_collected": int(trajectory_id),
+            "trajectories_remaining": trajectories_remaining,
+            "trajectory_progress_pct": trajectory_progress_pct,
             "elapsed_total_seconds": elapsed_seconds,
             "samples_per_second": samples_per_second,
             "eta_seconds": eta_seconds,
@@ -243,7 +281,7 @@ def main():
         flush=True,
     )
 
-    while len(records) < args.target_samples:
+    while not generation_complete():
         matrix_type, n = pairings[matrix_counter % len(pairings)]
         matrix_seed = args.seed + matrix_counter
         matrix_counter += 1
@@ -267,7 +305,7 @@ def main():
         )
 
         for local_traj_idx in range(args.trajectories_per_type):
-            if len(records) >= args.target_samples:
+            if generation_complete():
                 break
 
             accepted_records = None
@@ -414,6 +452,10 @@ def main():
                     tagged["matrix_type"] = matrix_type
                     tagged["point_sampler"] = sampler
                     tagged_records.append(tagged)
+                raw_record_count = int(len(trajectory))
+                augmented_record_count = int(len(augmented))
+                if args.max_samples_per_trajectory is not None:
+                    tagged_records = evenly_subsample_records(tagged_records, int(args.max_samples_per_trajectory))
 
                 accepted_records = tagged_records
                 accepted_meta = {
@@ -431,6 +473,8 @@ def main():
                     "closed": bool(closed),
                     "raw_steps": int(len(trajectory)),
                     "saved_samples": int(len(tagged_records)),
+                    "raw_saved_samples": raw_record_count,
+                    "augmented_saved_samples": augmented_record_count,
                 }
                 break
 
