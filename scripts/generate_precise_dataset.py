@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
+import time
 from typing import Any
 
 import numpy as np
@@ -34,10 +36,23 @@ def build_matrix(matrix_type: str, n: int, seed: int) -> np.ndarray:
 def trajectory_closed(records: list[dict[str, Any]], z0: complex, closure_tol: float) -> bool:
     if not records:
         return False
-    z_last = complex(records[-1]["z_next"])
     if len(records) < 16:
         return False
-    return abs(z_last - z0) < closure_tol
+    if bool(records[-1].get("closed", False)):
+        return True
+
+    z_last = complex(records[-1]["z_next"])
+    last_ds = max(float(records[-1].get("ds_expert", 0.0)), 1e-8)
+    effective_closure_tol = max(float(closure_tol), 0.5 * last_ds)
+    if abs(z_last - z0) >= effective_closure_tol:
+        return False
+
+    points = np.asarray([z0] + [complex(r["z_next"]) for r in records], dtype=np.complex128)
+    path_length = float(np.sum(np.abs(np.diff(points))))
+    max_distance_from_start = float(np.max(np.abs(points - z0)))
+    min_path_length = max(20.0 * float(closure_tol), 10.0 * last_ds)
+    min_escape_distance = max(10.0 * float(closure_tol), 5.0 * last_ds)
+    return path_length >= min_path_length and max_distance_from_start >= min_escape_distance
 
 
 def serialize_complex(z: complex) -> list[float]:
@@ -138,6 +153,7 @@ def main():
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    wall_start = time.perf_counter()
 
     rng = np.random.default_rng(args.seed)
     records: list[dict[str, Any]] = []
@@ -175,11 +191,43 @@ def main():
     }
     epsilon_values: list[float] = []
 
+    def progress_fields() -> dict[str, Any]:
+        elapsed_seconds = float(time.perf_counter() - wall_start)
+        samples_collected = int(len(records))
+        samples_remaining = int(max(args.target_samples - samples_collected, 0))
+        progress_pct = float(100.0 * samples_collected / max(int(args.target_samples), 1))
+        samples_per_second = float(samples_collected / elapsed_seconds) if elapsed_seconds > 1e-12 else 0.0
+        eta_seconds = (
+            float(samples_remaining / samples_per_second)
+            if samples_per_second > 1e-12
+            else None
+        )
+        avg_samples_per_trajectory = (
+            float(samples_collected / trajectory_id)
+            if trajectory_id > 0
+            else None
+        )
+        estimated_trajectories_remaining = (
+            int(math.ceil(samples_remaining / avg_samples_per_trajectory))
+            if avg_samples_per_trajectory is not None and avg_samples_per_trajectory > 1e-12
+            else None
+        )
+        return {
+            "target_samples": int(args.target_samples),
+            "samples_collected": samples_collected,
+            "samples_remaining": samples_remaining,
+            "progress_pct": progress_pct,
+            "trajectories_collected": int(trajectory_id),
+            "elapsed_total_seconds": elapsed_seconds,
+            "samples_per_second": samples_per_second,
+            "eta_seconds": eta_seconds,
+            "estimated_trajectories_remaining": estimated_trajectories_remaining,
+        }
+
     print(
         json.dumps(
             {
                 "stage": "dataset_generation_started",
-                "target_samples": args.target_samples,
                 "matrix_sizes": args.matrix_sizes,
                 "matrix_types": args.matrix_types,
                 "sample_mode": args.sample_mode,
@@ -188,6 +236,7 @@ def main():
                 "dagger_factor": args.dagger_factor,
                 "output_dir": str(output_dir),
                 "status_every": args.status_every,
+                **progress_fields(),
             },
             ensure_ascii=False,
         ),
@@ -210,8 +259,7 @@ def main():
                     "matrix_seed": matrix_seed,
                     "matrix_type": matrix_type,
                     "matrix_size": n,
-                    "samples_collected": len(records),
-                    "trajectories_collected": trajectory_id,
+                    **progress_fields(),
                 },
                 ensure_ascii=False,
             ),
@@ -263,6 +311,7 @@ def main():
                             "matrix_size": n,
                             "point_sampler": sampler,
                             "epsilon": float(epsilon),
+                            **progress_fields(),
                         },
                         ensure_ascii=False,
                     ),
@@ -284,8 +333,11 @@ def main():
                                     "elapsed_seconds": float(record.get("elapsed_seconds", 0.0)),
                                     "ds_expert": float(record["ds_expert"]),
                                     "y_restart": int(record["y_restart"]),
+                                    "applied_projection": int(record.get("applied_projection", False)),
+                                    "backtracks": int(record.get("backtracks", 0)),
                                     "sigma_error": float(record["sigma_error"]),
                                     "residual": float(record["residual"]),
+                                    **progress_fields(),
                                 },
                                 ensure_ascii=False,
                             ),
@@ -335,6 +387,7 @@ def main():
                                 "matrix_size": n,
                                 "elapsed_seconds": float(trajectory[-1].get("elapsed_seconds", 0.0)),
                                 "steps_completed": int(len(trajectory)),
+                                **progress_fields(),
                             },
                             ensure_ascii=False,
                         ),
@@ -396,6 +449,7 @@ def main():
                                 "open_trajectory": stats["attempts_open_trajectory"],
                                 "generation_failed": stats["attempts_generation_failed"],
                             },
+                            **progress_fields(),
                         },
                         ensure_ascii=False,
                     ),
@@ -406,14 +460,13 @@ def main():
                         json.dumps(
                             {
                                 "stage": "status",
-                                "samples_collected": len(records),
-                                "trajectories_collected": trajectory_id,
                                 "attempts_total": total_attempts,
                                 "projection_failed": stats["attempts_projection_failed"],
                                 "epsilon_filtered": stats["attempts_epsilon_filtered"],
                                 "empty_trajectory": stats["attempts_empty_trajectory"],
                                 "open_trajectory": stats["attempts_open_trajectory"],
                                 "generation_failed": stats["attempts_generation_failed"],
+                                **progress_fields(),
                             },
                             ensure_ascii=False,
                         ),
@@ -448,8 +501,8 @@ def main():
                         "epsilon": accepted_meta["epsilon"],
                         "closed": accepted_meta["closed"],
                         "saved_samples": len(accepted_records),
-                        "samples_collected": len(records),
                         "attempts_total": total_attempts,
+                        **progress_fields(),
                     },
                     ensure_ascii=False,
                 ),
@@ -459,18 +512,17 @@ def main():
             if args.status_every > 0 and total_attempts % args.status_every == 0:
                 print(
                     json.dumps(
-                        {
-                            "stage": "status",
-                            "samples_collected": len(records),
-                            "trajectories_collected": trajectory_id,
-                            "attempts_total": total_attempts,
-                            "projection_failed": stats["attempts_projection_failed"],
-                            "epsilon_filtered": stats["attempts_epsilon_filtered"],
-                            "empty_trajectory": stats["attempts_empty_trajectory"],
-                            "open_trajectory": stats["attempts_open_trajectory"],
-                            "generation_failed": stats["attempts_generation_failed"],
-                        },
-                        ensure_ascii=False,
+                    {
+                        "stage": "status",
+                        "attempts_total": total_attempts,
+                        "projection_failed": stats["attempts_projection_failed"],
+                        "epsilon_filtered": stats["attempts_epsilon_filtered"],
+                        "empty_trajectory": stats["attempts_empty_trajectory"],
+                        "open_trajectory": stats["attempts_open_trajectory"],
+                        "generation_failed": stats["attempts_generation_failed"],
+                        **progress_fields(),
+                    },
+                    ensure_ascii=False,
                         ),
                         flush=True,
                     )
@@ -487,8 +539,8 @@ def main():
                     json.dumps(
                         {
                             "stage": "partial_saved",
-                            "samples_collected": len(records),
                             "output_dir": str(output_dir),
+                            **progress_fields(),
                         },
                         ensure_ascii=False,
                     ),

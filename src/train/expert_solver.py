@@ -5,10 +5,12 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from scipy.integrate import RK45
+from scipy.optimize import brentq
 
 from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
+from src.solvers.rk4 import rk4_triplet_step
+from src.utils.contour_init import project_to_contour, sigma_min_at
 from src.utils.metrics import residual_norm
 from src.utils.svd import smallest_singular_triplet
 
@@ -24,10 +26,13 @@ class ExpertStepResult:
     gamma: float
     y_restart: int
     restart_reason: Optional[str] = None
+    backtracks: int = 0
+    applied_projection: bool = False
+    suggested_next_step: float = 0.0
 
 
 class ExpertSolver:
-    """High-accuracy teacher policy based on single-step adaptive RK45."""
+    """High-accuracy teacher policy for precise contour-tracking data generation."""
 
     def __init__(
         self,
@@ -40,6 +45,11 @@ class ExpertSolver:
         drift_threshold: float = 1e-4,
         closure_tol: float = 1e-3,
         min_steps_before_restart: int = 5,
+        min_steps_before_closure: int = 32,
+        min_winding_angle: float = 1.5 * np.pi,
+        projection_tol: float = 1e-8,
+        min_step_size: float = 1e-6,
+        max_backtracks: int = 8,
         solver: Optional[PseudoinverseSolver] = None,
         svd_solver=None,
     ):
@@ -48,11 +58,16 @@ class ExpertSolver:
         self.n = self.A.shape[0]
         self.rtol = rtol
         self.atol = atol
-        self.max_step = max_step
-        self.first_step = first_step
-        self.drift_threshold = drift_threshold
-        self.closure_tol = closure_tol
-        self.min_steps_before_restart = min_steps_before_restart
+        self.max_step = float(max_step)
+        self.first_step = float(first_step)
+        self.drift_threshold = float(drift_threshold)
+        self.closure_tol = float(closure_tol)
+        self.min_steps_before_restart = int(min_steps_before_restart)
+        self.min_steps_before_closure = int(min_steps_before_closure)
+        self.min_winding_angle = float(min_winding_angle)
+        self.projection_tol = float(projection_tol)
+        self.min_step_size = float(min_step_size)
+        self.max_backtracks = int(max_backtracks)
         self.svd_solver = svd_solver or smallest_singular_triplet
         self.linear_solver = solver or PseudoinverseSolver()
         self.ode = ManifoldODE(self.A, self.epsilon, solver=self.linear_solver)
@@ -64,38 +79,196 @@ class ExpertSolver:
         M = z * np.eye(self.n, dtype=np.complex128) - self.A
         return float(np.abs(np.vdot(u, M @ v)))
 
-    def _pack_state(self, z: complex, u: np.ndarray, v: np.ndarray) -> np.ndarray:
-        y = np.zeros(2 + 4 * self.n, dtype=np.float64)
-        y[0] = np.real(z)
-        y[1] = np.imag(z)
-        y[2 : 2 + self.n] = np.real(u)
-        y[2 + self.n : 2 + 2 * self.n] = np.imag(u)
-        y[2 + 2 * self.n : 2 + 3 * self.n] = np.real(v)
-        y[2 + 3 * self.n :] = np.imag(v)
-        return y
+    def compute_sigma_error(self, z: complex, u: np.ndarray, v: np.ndarray) -> float:
+        approx_error = abs(self.compute_sigma_approx(z, u, v) - self.epsilon)
+        true_error = abs(sigma_min_at(self.A, z) - self.epsilon)
+        return float(max(approx_error, true_error))
 
-    def _unpack_state(self, y: np.ndarray) -> Tuple[complex, np.ndarray, np.ndarray]:
-        z = y[0] + 1j * y[1]
-        u = y[2 : 2 + self.n] + 1j * y[2 + self.n : 2 + 2 * self.n]
-        v = y[2 + 2 * self.n : 2 + 3 * self.n] + 1j * y[2 + 3 * self.n :]
-        return z, u, v
+    def _closure_anchor(self, z0: complex) -> complex:
+        eigvals = np.linalg.eigvals(self.A)
+        return complex(eigvals[int(np.argmin(np.abs(eigvals - z0)))])
 
-    def _ode_rhs(self, _: float, y: np.ndarray) -> np.ndarray:
-        z, u, v = self._unpack_state(y)
-        dz_ds, du_ds, dv_ds = self.ode.get_full_derivatives(z, u, v)
-        dy = np.zeros_like(y, dtype=np.float64)
-        dy[0] = np.real(dz_ds)
-        dy[1] = np.imag(dz_ds)
-        dy[2 : 2 + self.n] = np.real(du_ds)
-        dy[2 + self.n : 2 + 2 * self.n] = np.imag(du_ds)
-        dy[2 + 2 * self.n : 2 + 3 * self.n] = np.real(dv_ds)
-        dy[2 + 3 * self.n :] = np.imag(dv_ds)
-        return dy
+    def _check_closure(
+        self,
+        z_current: complex,
+        z_start: complex,
+        current_step: int,
+        path_length: float,
+        max_distance_from_start: float,
+        winding_angle: float,
+        last_step_size: float,
+    ) -> bool:
+        if current_step < self.min_steps_before_closure:
+            return False
+
+        effective_closure_tol = float(max(self.closure_tol, 0.5 * float(last_step_size)))
+        if abs(z_current - z_start) >= effective_closure_tol:
+            return False
+
+        min_path_length = max(20.0 * self.closure_tol, 10.0 * self.first_step)
+        min_escape_distance = max(10.0 * self.closure_tol, 5.0 * self.first_step)
+        if path_length < min_path_length:
+            return False
+        if max_distance_from_start < min_escape_distance:
+            return False
+        if abs(winding_angle) < self.min_winding_angle:
+            return False
+        return True
+
+    def _project_to_contour_locally(
+        self,
+        z_candidate: complex,
+        search_radius: float,
+    ) -> tuple[complex, np.ndarray, np.ndarray, dict] | None:
+        sigma_candidate, u_candidate, v_candidate = self.svd_solver(self.A, z_candidate)
+        u_candidate = u_candidate / max(np.linalg.norm(u_candidate), 1e-15)
+        v_candidate = v_candidate / max(np.linalg.norm(v_candidate), 1e-15)
+        sigma_error = abs(float(sigma_candidate) - self.epsilon)
+        if sigma_error <= max(self.projection_tol, 1e-10):
+            return z_candidate, u_candidate, v_candidate, {
+                "sigma": float(sigma_candidate),
+                "sigma_error": float(sigma_error),
+                "projection_distance": 0.0,
+                "projection_expansions": 0,
+                "projection_mode": "local_exact",
+            }
+
+        gamma = np.vdot(v_candidate, u_candidate)
+        gamma_norm = abs(gamma)
+        if gamma_norm < 1e-15:
+            return None
+        normal = gamma / gamma_norm
+
+        def objective(alpha: float) -> float:
+            return sigma_min_at(self.A, z_candidate + alpha * normal) - self.epsilon
+
+        f0 = float(sigma_candidate - self.epsilon)
+        step_scale = max(float(search_radius), self.min_step_size, 1e-6)
+        roots: list[tuple[float, float, int]] = []
+        for direction in (1.0, -1.0):
+            bound = direction * step_scale
+            f_bound = objective(bound)
+            expansions = 0
+            while f0 * f_bound > 0.0 and expansions < 12:
+                bound *= 2.0
+                f_bound = objective(bound)
+                expansions += 1
+            if f0 * f_bound > 0.0:
+                continue
+            try:
+                alpha = brentq(
+                    objective,
+                    min(0.0, bound),
+                    max(0.0, bound),
+                    xtol=min(self.projection_tol, 1e-8),
+                    maxiter=100,
+                )
+            except ValueError:
+                continue
+            roots.append((abs(alpha), alpha, expansions))
+
+        if not roots:
+            return None
+
+        _, alpha, expansions = min(roots, key=lambda item: item[0])
+        z_projected = z_candidate + alpha * normal
+        sigma_projected, u_projected, v_projected = self.svd_solver(self.A, z_projected)
+        u_projected = u_projected / max(np.linalg.norm(u_projected), 1e-15)
+        v_projected = v_projected / max(np.linalg.norm(v_projected), 1e-15)
+        return z_projected, u_projected, v_projected, {
+            "sigma": float(sigma_projected),
+            "sigma_error": float(abs(float(sigma_projected) - self.epsilon)),
+            "projection_distance": float(abs(alpha)),
+            "projection_expansions": int(expansions),
+            "projection_mode": "local_normal",
+        }
+
+    def _advance_projected_step(
+        self,
+        z: complex,
+        u: np.ndarray,
+        v: np.ndarray,
+        ds: float,
+    ) -> tuple[complex, np.ndarray, np.ndarray, float, dict]:
+        ds_try = float(np.clip(ds, self.min_step_size, self.max_step))
+
+        for backtrack_idx in range(self.max_backtracks + 1):
+            z_candidate, _, _ = rk4_triplet_step(
+                self.ode.get_full_derivatives,
+                z,
+                u,
+                v,
+                ds_try,
+            )
+            sigma_candidate, u_exact, v_exact = self.svd_solver(self.A, z_candidate)
+            u_exact = u_exact / max(np.linalg.norm(u_exact), 1e-15)
+            v_exact = v_exact / max(np.linalg.norm(v_exact), 1e-15)
+            sigma_error = abs(float(sigma_candidate) - self.epsilon)
+
+            if sigma_error <= max(self.projection_tol, 1e-10):
+                return z_candidate, u_exact, v_exact, ds_try, {
+                    "backtracks": backtrack_idx,
+                    "applied_projection": False,
+                    "sigma": float(sigma_candidate),
+                    "sigma_error": float(sigma_error),
+                    "projection_distance": 0.0,
+                    "projection_expansions": 0,
+                    "projection_mode": "none",
+                }
+
+            local_projection = self._project_to_contour_locally(z_candidate, search_radius=ds_try)
+            if local_projection is not None:
+                z_projected, u_projected, v_projected, projection_info = local_projection
+                if projection_info["sigma_error"] <= max(self.projection_tol, 1e-8):
+                    return z_projected, u_projected, v_projected, ds_try, {
+                        "backtracks": backtrack_idx,
+                        "applied_projection": True,
+                        **projection_info,
+                    }
+
+            try:
+                z_projected, sigma_projected = project_to_contour(
+                    self.A,
+                    self.epsilon,
+                    z_candidate,
+                    tol=min(self.projection_tol, 1e-6),
+                )
+            except ValueError:
+                z_projected, sigma_projected = None, None
+            if z_projected is not None and abs(float(sigma_projected) - self.epsilon) <= max(self.projection_tol, 1e-8):
+                _, u_projected, v_projected = self.svd_solver(self.A, z_projected)
+                u_projected = u_projected / max(np.linalg.norm(u_projected), 1e-15)
+                v_projected = v_projected / max(np.linalg.norm(v_projected), 1e-15)
+                return z_projected, u_projected, v_projected, ds_try, {
+                    "backtracks": backtrack_idx,
+                    "applied_projection": True,
+                    "sigma": float(sigma_projected),
+                    "sigma_error": float(abs(float(sigma_projected) - self.epsilon)),
+                    "projection_distance": float(abs(z_projected - z_candidate)),
+                    "projection_expansions": 0,
+                    "projection_mode": "radial_fallback",
+                }
+
+            if ds_try <= self.min_step_size * (1.0 + 1e-12):
+                break
+            ds_try = max(0.5 * ds_try, self.min_step_size)
+
+        raise RuntimeError("Unable to advance a teacher step while remaining on the epsilon contour.")
+
+    def _adapt_next_step_size(self, current_step_size: float, backtracks: int, applied_projection: bool) -> float:
+        next_step = float(current_step_size)
+        if backtracks > 0:
+            next_step *= 0.8
+        elif applied_projection:
+            next_step *= 1.0
+        else:
+            next_step *= 1.1
+        return float(np.clip(next_step, self.min_step_size, self.max_step))
 
     def _restart_reason(self, z: complex, u: np.ndarray, v: np.ndarray, steps_since_restart: int) -> Tuple[int, Optional[str], float, float, float]:
         residual = self.compute_residual(z, u, v)
-        sigma_error = abs(self.compute_sigma_approx(z, u, v) - self.epsilon)
-        gamma = abs(np.vdot(u, v))
+        sigma_error = self.compute_sigma_error(z, u, v)
+        gamma = abs(np.vdot(v, u))
         if gamma < 1e-6:
             return 1, "singular_gamma", residual, sigma_error, gamma
         if steps_since_restart >= self.min_steps_before_restart and residual > self.drift_threshold:
@@ -130,21 +303,19 @@ class ExpertSolver:
                 gamma=gamma,
                 y_restart=1,
                 restart_reason=restart_reason,
+                backtracks=0,
+                applied_projection=False,
+                suggested_next_step=max(self.first_step, self.min_step_size),
             )
 
-        y0 = self._pack_state(z, u, v)
-        rk_solver = RK45(
-            fun=self._ode_rhs,
-            t0=0.0,
-            y0=y0,
-            t_bound=1.0,
-            max_step=self.max_step,
-            rtol=self.rtol,
-            atol=self.atol,
-            first_step=min(first_step_hint or self.first_step, self.max_step),
-        )
-        rk_solver.step()
-        if rk_solver.status == "failed":
+        try:
+            z_next, u_next, v_next, ds_expert, step_info = self._advance_projected_step(
+                z=z,
+                u=u,
+                v=v,
+                ds=max(first_step_hint or self.first_step, self.min_step_size),
+            )
+        except RuntimeError:
             _, u_exact, v_exact = self.svd_solver(self.A, z)
             u_exact = u_exact / max(np.linalg.norm(u_exact), 1e-15)
             v_exact = v_exact / max(np.linalg.norm(v_exact), 1e-15)
@@ -157,21 +328,29 @@ class ExpertSolver:
                 sigma_error=sigma_error,
                 gamma=gamma,
                 y_restart=1,
-                restart_reason="rk_failure",
+                restart_reason="projection_failed",
+                backtracks=self.max_backtracks,
+                applied_projection=False,
+                suggested_next_step=max(self.first_step, self.min_step_size),
             )
-        ds_expert = float(rk_solver.step_size if rk_solver.step_size is not None else self.first_step)
-        z_next, u_next, v_next = self._unpack_state(rk_solver.y)
-        u_next = u_next / max(np.linalg.norm(u_next), 1e-15)
-        v_next = v_next / max(np.linalg.norm(v_next), 1e-15)
+
         return ExpertStepResult(
             z_next=z_next,
             u_next=u_next,
             v_next=v_next,
-            ds_expert=ds_expert,
+            ds_expert=float(ds_expert),
             residual=residual,
             sigma_error=sigma_error,
             gamma=gamma,
             y_restart=0,
+            restart_reason=None,
+            backtracks=int(step_info["backtracks"]),
+            applied_projection=bool(step_info["applied_projection"]),
+            suggested_next_step=self._adapt_next_step_size(
+                current_step_size=float(ds_expert),
+                backtracks=int(step_info["backtracks"]),
+                applied_projection=bool(step_info["applied_projection"]),
+            ),
         )
 
     def generate_expert_trajectory(
@@ -184,17 +363,48 @@ class ExpertSolver:
         _, u, v = self.svd_solver(self.A, z0)
         u = u / max(np.linalg.norm(u), 1e-15)
         v = v / max(np.linalg.norm(v), 1e-15)
-        z = z0
+        z = complex(z0)
         steps_since_restart = 0
         step_hint = self.first_step
         trajectory = []
         start_time = time.perf_counter()
+        path_length = 0.0
+        max_distance_from_start = 0.0
+        closure_anchor = self._closure_anchor(z0)
+        prev_anchor_angle = None if abs(z0 - closure_anchor) < 1e-12 else float(np.angle(z0 - closure_anchor))
+        winding_angle = 0.0
 
         for step_idx in range(max_steps):
+            z_prev = z
             result = self._step_with_hint(z, u, v, steps_since_restart=steps_since_restart, first_step_hint=step_hint)
             elapsed_seconds = float(time.perf_counter() - start_time)
+            step_distance = float(abs(result.z_next - z_prev))
+            path_length += step_distance
+            max_distance_from_start = max(max_distance_from_start, float(abs(result.z_next - z0)))
+
+            if prev_anchor_angle is not None and abs(result.z_next - closure_anchor) >= 1e-12:
+                current_anchor_angle = float(np.angle(result.z_next - closure_anchor))
+                delta = current_anchor_angle - prev_anchor_angle
+                delta = float(np.angle(np.exp(1j * delta)))
+                winding_angle += delta
+                prev_anchor_angle = current_anchor_angle
+            elif abs(result.z_next - closure_anchor) >= 1e-12:
+                prev_anchor_angle = float(np.angle(result.z_next - closure_anchor))
+
+            closed = False
+            if result.y_restart == 0:
+                closed = self._check_closure(
+                    z_current=result.z_next,
+                    z_start=z0,
+                    current_step=step_idx + 1,
+                    path_length=path_length,
+                    max_distance_from_start=max_distance_from_start,
+                    winding_angle=winding_angle,
+                    last_step_size=max(float(result.ds_expert), self.min_step_size),
+                )
+
             record = {
-                "z": z,
+                "z": z_prev,
                 "u": u.copy(),
                 "v": v.copy(),
                 "z_next": result.z_next,
@@ -208,14 +418,27 @@ class ExpertSolver:
                 "gamma": result.gamma,
                 "step": step_idx,
                 "elapsed_seconds": elapsed_seconds,
+                "backtracks": result.backtracks,
+                "applied_projection": result.applied_projection,
+                "step_distance": step_distance,
+                "path_length": float(path_length),
+                "max_distance_from_start": float(max_distance_from_start),
+                "winding_angle": float(winding_angle),
+                "closed": bool(closed),
             }
             trajectory.append(record)
             if step_callback is not None:
                 step_callback(record)
+
             z, u, v = result.z_next, result.u_next, result.v_next
             steps_since_restart = 0 if result.y_restart else steps_since_restart + 1
-            step_hint = self.first_step if result.y_restart else max(min(result.ds_expert, self.max_step), 1e-8)
-            if step_idx >= 10 and abs(z - z0) < self.closure_tol:
+            step_hint = (
+                max(self.first_step, self.min_step_size)
+                if result.y_restart
+                else float(result.suggested_next_step)
+            )
+
+            if closed:
                 break
             if max_wall_seconds is not None and elapsed_seconds >= float(max_wall_seconds):
                 break
