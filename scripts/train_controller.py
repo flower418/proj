@@ -71,7 +71,10 @@ def main():
     train_dataset = torch.utils.data.Subset(dataset, range(split))
     val_dataset = torch.utils.data.Subset(dataset, range(split, len(dataset)))
 
-    model = build_controller(config["controller"], input_dim=7).to(device)
+    model = build_controller(
+        config["controller"],
+        input_dim=int(config["controller"].get("input_dim", 7)),
+    ).to(device)
     loss_fn = ControllerLoss(
         lambda_step=config["training"]["lambda_step"],
         lambda_restart=config["training"]["lambda_restart"],

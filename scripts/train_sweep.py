@@ -152,7 +152,10 @@ def main():
         experiment_name = f"{args.experiment_prefix}/{trial['name']}"
         print(f"\n=== Trial {trial_index + 1}/{len(trials)}: {trial['name']} (seed={seed}) ===")
 
-        model = build_controller(effective["controller"], input_dim=7).to(device)
+        model = build_controller(
+            effective["controller"],
+            input_dim=int(effective["controller"].get("input_dim", config["controller"].get("input_dim", 7))),
+        ).to(device)
         loss_fn = ControllerLoss(
             lambda_step=effective["training"]["lambda_step"],
             lambda_restart=effective["training"]["lambda_restart"],

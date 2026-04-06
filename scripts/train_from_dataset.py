@@ -97,7 +97,10 @@ def main():
     print(f"Val batches: {len(val_loader)}")
 
     # 创建模型
-    model = build_controller(controller_cfg, input_dim=7).to(device)
+    model = build_controller(
+        controller_cfg,
+        input_dim=int(controller_cfg.get("input_dim", config["controller"].get("input_dim", 7))),
+    ).to(device)
 
     # 损失函数
     loss_fn = ControllerLoss(

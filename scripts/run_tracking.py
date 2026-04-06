@@ -101,7 +101,11 @@ def main():
     controller = None
     if args.checkpoint is not None:
         checkpoint = torch.load(args.checkpoint, map_location="cpu")
-        controller = build_controller_from_checkpoint(checkpoint, config["controller"], input_dim=7)
+        controller = build_controller_from_checkpoint(
+            checkpoint,
+            config["controller"],
+            input_dim=int(config["controller"].get("input_dim", 7)),
+        )
         controller.load_state_dict(checkpoint["model_state_dict"])
         controller.eval()
     ode = ManifoldODE(A, epsilon=epsilon, solver=solver)
