@@ -183,7 +183,7 @@ class NewtonPredictorCorrectorTracker:
             next_step *= 0.7
         return float(np.clip(next_step, self.min_step_size, self.max_step_size))
 
-    def track(self, z0: complex, max_steps: int = 4000) -> Dict:
+    def track(self, z0: complex, max_steps: int = 4000, step_callback=None) -> Dict:
         z0, u, v, sigma_at_start = self._initialize_state(z0)
         z = z0
         trajectory = [z0]
@@ -251,6 +251,27 @@ class NewtonPredictorCorrectorTracker:
             corrector_iterations.append(int(accepted.iterations))
             predictor_halvings.append(int(accepted_halvings))
             line_search_backtracks.append(int(accepted.line_search_backtracks))
+
+            if step_callback is not None:
+                step_callback(
+                    {
+                        "step": step,
+                        "z_prev": z_prev,
+                        "z_next": z,
+                        "ds": float(accepted_step),
+                        "step_distance": step_distance,
+                        "distance_to_start": float(np.abs(z - z0)),
+                        "path_length": float(path_length),
+                        "max_distance_from_start": float(max_distance_from_start),
+                        "winding_angle": float(winding_angle),
+                        "sigma": float(accepted.sigma),
+                        "sigma_error": float(abs(accepted.sigma - self.epsilon)),
+                        "backtracks": int(accepted_halvings),
+                        "predictor_halvings": int(accepted_halvings),
+                        "corrector_iterations": int(accepted.iterations),
+                        "line_search_backtracks": int(accepted.line_search_backtracks),
+                    }
+                )
 
             if self.check_closure(
                 z_current=z,

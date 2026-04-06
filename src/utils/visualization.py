@@ -132,7 +132,7 @@ def plot_trajectory(
     ax.set_title(
         title or (f"Pseudospectrum Contour (epsilon={epsilon})" if epsilon is not None else "Pseudospectrum Contour"),
         fontsize=11,
-        pad=16,
+        pad=20,
         loc="left",
         wrap=True,
     )
@@ -142,9 +142,7 @@ def plot_trajectory(
         ax.legend(
             handles,
             labels,
-            loc="lower center",
-            bbox_to_anchor=(0.5, 1.02),
-            ncol=min(len(handles), 4),
+            loc="lower right",
             frameon=True,
             fontsize=9,
             handlelength=1.8,

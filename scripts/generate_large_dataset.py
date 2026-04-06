@@ -12,8 +12,9 @@ import _bootstrap  # noqa: F401
 
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.nn.features import extract_features
-from src.train.expert_solver import ExpertSolver
 from src.train.dagger_augmentation import DAggerAugmenter
+from src.train.expert_solver import ExpertSolver
+from src.utils.run_logging import RunLogger
 
 
 class MatrixGenerator:
@@ -107,7 +108,11 @@ def generate_trajectory(
 
         z, u, v = result.z_next, result.u_next, result.v_next
         steps_since_restart = 0 if result.y_restart else steps_since_restart + 1
-        step_hint = max(min(result.ds_expert, expert.max_step), 1e-8)
+        step_hint = (
+            max(expert.first_step, expert.min_step_size)
+            if result.y_restart
+            else float(result.suggested_next_step)
+        )
 
         if step_idx >= 10 and abs(z - z0) < expert.closure_tol:
             break
@@ -123,6 +128,13 @@ def augment_trajectory(trajectory: List[Dict], A: np.ndarray, epsilon: float, nu
     return augmenter.augment_trajectory(trajectory, num_perturbations_per_point=num_perturbations)
 
 
+def _log_message(run_logger: RunLogger | None, message: str) -> None:
+    if run_logger is None:
+        print(message)
+    else:
+        run_logger.log(message)
+
+
 def generate_diverse_dataset(
     target_samples: int = 10000,
     matrix_sizes: List[int] = None,
@@ -133,6 +145,7 @@ def generate_diverse_dataset(
     output_dir: str = "data",
     save_every: int = 5000,
     seed: int = 0,
+    run_logger: RunLogger | None = None,
 ) -> Dict:
     """生成多样化数据集"""
     if matrix_sizes is None:
@@ -152,7 +165,7 @@ def generate_diverse_dataset(
             if len(all_records) >= target_samples:
                 break
 
-            print(f"\n生成：{matrix_type}, n={n}")
+            _log_message(run_logger, f"生成：{matrix_type}, n={n}")
 
             for traj_idx in range(trajectories_per_type):
                 if len(all_records) >= target_samples:
@@ -171,7 +184,7 @@ def generate_diverse_dataset(
                     if z0 is None:
                         continue
 
-                    print(f"  轨迹 {traj_idx + 1}, 起点 {start_idx + 1}: z0 = {z0:.3f}")
+                    _log_message(run_logger, f"  轨迹 {traj_idx + 1}, 起点 {start_idx + 1}: z0 = {z0:.3f}")
 
                     try:
                         trajectory = generate_trajectory(A, 0.1, z0, max_steps)
@@ -198,14 +211,53 @@ def generate_diverse_dataset(
                                     stats["restart_samples"] += 1
 
                         stats["trajectories"] += 1
+                        stats["matrix_types"][matrix_type] = int(stats["matrix_types"].get(matrix_type, 0) + len(trajectory) + (len(augmented) if dagger_factor > 0 else 0))
+                        size_key = str(n)
+                        stats["matrix_sizes"][size_key] = int(stats["matrix_sizes"].get(size_key, 0) + len(trajectory) + (len(augmented) if dagger_factor > 0 else 0))
+                        if run_logger is not None:
+                            run_logger.append_jsonl(
+                                "progress.jsonl",
+                                {
+                                    "event": "trajectory_done",
+                                    "matrix_type": matrix_type,
+                                    "matrix_size": n,
+                                    "trajectory_index": traj_idx,
+                                    "start_index": start_idx,
+                                    "raw_samples": len(trajectory),
+                                    "augmented_samples": len(augmented) if dagger_factor > 0 else 0,
+                                    "total_samples": stats["total_samples"],
+                                    "restart_samples": stats["restart_samples"],
+                                },
+                            )
 
                         # 定期保存
                         if len(all_records) % save_every == 0:
                             save_dataset(all_records, output_path, f"partial_{len(all_records)}", rng=rng)
-                            print(f"    已保存 {len(all_records)} 样本")
+                            _log_message(run_logger, f"    已保存 {len(all_records)} 样本")
+                            if run_logger is not None:
+                                run_logger.append_jsonl(
+                                    "progress.jsonl",
+                                    {
+                                        "event": "partial_save",
+                                        "total_samples": len(all_records),
+                                        "save_every": save_every,
+                                    },
+                                )
 
                     except Exception as e:
-                        print(f"    失败：{e}")
+                        _log_message(run_logger, f"    失败：{e}")
+                        if run_logger is not None:
+                            run_logger.append_jsonl(
+                                "progress.jsonl",
+                                {
+                                    "event": "trajectory_failed",
+                                    "matrix_type": matrix_type,
+                                    "matrix_size": n,
+                                    "trajectory_index": traj_idx,
+                                    "start_index": start_idx,
+                                    "error": str(e),
+                                },
+                            )
                         continue
 
     # 最终保存
@@ -258,25 +310,32 @@ def parse_args():
     parser.add_argument("--output-dir", type=str, default="data")
     parser.add_argument("--save-every", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--log-dir", type=str, default=None, help="Directory for runtime logs. Defaults to <output-dir>/logs.")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-
-    stats = generate_diverse_dataset(
-        target_samples=args.target_samples,
-        matrix_sizes=args.matrix_sizes,
-        matrix_types=args.matrix_types,
-        trajectories_per_type=args.trajectories_per_type,
-        max_steps=args.max_steps,
-        dagger_factor=args.dagger_factor,
-        output_dir=args.output_dir,
-        save_every=args.save_every,
-        seed=args.seed,
-    )
-
-    print(f"\n完成！总样本：{stats['total_samples']:,}, 重启：{stats['restart_samples']:,}")
+    log_root = Path(args.log_dir) if args.log_dir is not None else Path(args.output_dir) / "logs"
+    with RunLogger(log_root, run_name="generate_large_dataset") as run_logger:
+        run_logger.write_json("run_config.json", {"args": vars(args)})
+        stats = generate_diverse_dataset(
+            target_samples=args.target_samples,
+            matrix_sizes=args.matrix_sizes,
+            matrix_types=args.matrix_types,
+            trajectories_per_type=args.trajectories_per_type,
+            max_steps=args.max_steps,
+            dagger_factor=args.dagger_factor,
+            output_dir=args.output_dir,
+            save_every=args.save_every,
+            seed=args.seed,
+            run_logger=run_logger,
+        )
+        summary_path = run_logger.write_json("generation_summary.json", stats)
+        run_logger.log(
+            f"完成！总样本：{stats['total_samples']:,}, 重启：{stats['restart_samples']:,}, "
+            f"log_dir={run_logger.log_dir}, summary={summary_path}"
+        )
 
 
 if __name__ == "__main__":
