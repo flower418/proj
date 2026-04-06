@@ -14,6 +14,8 @@ from src.core.pseudoinverse import PseudoinverseSolver
 from src.nn.features import extract_features
 from src.train.dagger_augmentation import DAggerAugmenter
 from src.train.expert_solver import ExpertSolver
+from src.utils.contour_init import project_to_contour, sigma_min_at
+from src.utils.demo_sampling import sample_random_point
 from src.utils.run_logging import RunLogger
 
 
@@ -135,6 +137,35 @@ def _log_message(run_logger: RunLogger | None, message: str) -> None:
         run_logger.log(message)
 
 
+def sample_contour_start(
+    A: np.ndarray,
+    rng: np.random.Generator,
+    epsilon_mode: str,
+    epsilon_value: float,
+    point_sampler: str,
+    radius_range: tuple[float, float],
+    box_padding: float,
+) -> tuple[complex, float, complex, complex]:
+    z_random, anchor = sample_random_point(
+        A=A,
+        rng=rng,
+        point_sampler=point_sampler,
+        radius_range=radius_range,
+        box_padding=box_padding,
+    )
+
+    if epsilon_mode == "point_sigma":
+        z0 = complex(z_random)
+        epsilon = float(sigma_min_at(A, z0))
+        return z0, epsilon, complex(z_random), complex(anchor)
+
+    if epsilon_mode in {"trained_epsilon", "fixed"}:
+        z0, sigma_at_start = project_to_contour(A, float(epsilon_value), z_random)
+        return complex(z0), float(sigma_at_start), complex(z_random), complex(anchor)
+
+    raise ValueError(f"Unsupported epsilon_mode: {epsilon_mode}")
+
+
 def generate_diverse_dataset(
     target_samples: int = 10000,
     matrix_sizes: List[int] = None,
@@ -145,6 +176,11 @@ def generate_diverse_dataset(
     output_dir: str = "data",
     save_every: int = 5000,
     seed: int = 0,
+    epsilon_mode: str = "point_sigma",
+    epsilon_value: float = 0.1,
+    point_sampler: str = "around_eigenvalue",
+    radius_range: tuple[float, float] = (0.15, 0.35),
+    box_padding: float = 0.25,
     run_logger: RunLogger | None = None,
 ) -> Dict:
     """生成多样化数据集"""
@@ -178,21 +214,34 @@ def generate_diverse_dataset(
                 num_starts = max(2, target_samples // (len(matrix_types) * len(matrix_sizes) * trajectories_per_type * 50))
 
                 for start_idx in range(num_starts):
-                    angle = 2 * np.pi * start_idx / num_starts + rng.uniform(-0.2, 0.2)
-                    z0 = find_contour_point(A, 0.1, angle)
-
-                    if z0 is None:
+                    try:
+                        z0, epsilon, z_random, anchor = sample_contour_start(
+                            A=A,
+                            rng=rng,
+                            epsilon_mode=epsilon_mode,
+                            epsilon_value=epsilon_value,
+                            point_sampler=point_sampler,
+                            radius_range=radius_range,
+                            box_padding=box_padding,
+                        )
+                    except ValueError:
                         continue
 
-                    _log_message(run_logger, f"  轨迹 {traj_idx + 1}, 起点 {start_idx + 1}: z0 = {z0:.3f}")
+                    _log_message(
+                        run_logger,
+                        f"  轨迹 {traj_idx + 1}, 起点 {start_idx + 1}: "
+                        f"epsilon={epsilon:.6f}, z0 = {z0:.3f}"
+                    )
 
                     try:
-                        trajectory = generate_trajectory(A, 0.1, z0, max_steps)
+                        trajectory = generate_trajectory(A, epsilon, z0, max_steps)
 
                         # 添加原始记录
                         for record in trajectory:
                             record["matrix_type"] = matrix_type
                             record["matrix_size"] = n
+                            record["epsilon"] = float(epsilon)
+                            record["sample_mode"] = epsilon_mode
                             all_records.append(record)
                             stats["total_samples"] += 1
                             if record["y_restart"] == 1:
@@ -200,11 +249,13 @@ def generate_diverse_dataset(
 
                         # DAgger 增强
                         if dagger_factor > 0:
-                            augmented = augment_trajectory(trajectory, A, 0.1, dagger_factor)
+                            augmented = augment_trajectory(trajectory, A, epsilon, dagger_factor)
                             for record in augmented:
                                 record["matrix_type"] = matrix_type
                                 record["matrix_size"] = n
                                 record["source"] = "dagger"
+                                record["epsilon"] = float(epsilon)
+                                record["sample_mode"] = epsilon_mode
                                 all_records.append(record)
                                 stats["total_samples"] += 1
                                 if record["y_restart"] == 1:
@@ -223,6 +274,11 @@ def generate_diverse_dataset(
                                     "matrix_size": n,
                                     "trajectory_index": traj_idx,
                                     "start_index": start_idx,
+                                    "epsilon": float(epsilon),
+                                    "sample_mode": epsilon_mode,
+                                    "random_point": [float(np.real(z_random)), float(np.imag(z_random))],
+                                    "start_point": [float(np.real(z0)), float(np.imag(z0))],
+                                    "nearest_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
                                     "raw_samples": len(trajectory),
                                     "augmented_samples": len(augmented) if dagger_factor > 0 else 0,
                                     "total_samples": stats["total_samples"],
@@ -310,6 +366,11 @@ def parse_args():
     parser.add_argument("--output-dir", type=str, default="data")
     parser.add_argument("--save-every", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--epsilon-mode", choices=["point_sigma", "trained_epsilon", "fixed"], default="point_sigma")
+    parser.add_argument("--epsilon-value", type=float, default=0.1, help="Used when --epsilon-mode is trained_epsilon or fixed.")
+    parser.add_argument("--point-sampler", choices=["spectral_box", "around_eigenvalue"], default="around_eigenvalue")
+    parser.add_argument("--radius-range", type=float, nargs=2, default=(0.15, 0.35), metavar=("R_MIN", "R_MAX"))
+    parser.add_argument("--box-padding", type=float, default=0.25)
     parser.add_argument("--log-dir", type=str, default=None, help="Directory for runtime logs. Defaults to <output-dir>/logs.")
     return parser.parse_args()
 
@@ -329,6 +390,11 @@ def main():
             output_dir=args.output_dir,
             save_every=args.save_every,
             seed=args.seed,
+            epsilon_mode=args.epsilon_mode,
+            epsilon_value=args.epsilon_value,
+            point_sampler=args.point_sampler,
+            radius_range=tuple(args.radius_range),
+            box_padding=args.box_padding,
             run_logger=run_logger,
         )
         summary_path = run_logger.write_json("generation_summary.json", stats)
