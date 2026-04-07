@@ -13,6 +13,7 @@ from src.core.contour_tracker import ContourTracker
 from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.nn.controller import NNController, build_controller_from_checkpoint
+from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.config import load_yaml_config
 from src.utils.contour_init import project_to_contour, sigma_min_at
 from src.utils.run_logging import StepDiagnosticsCollector, RunLogger, format_nn_step, make_step_callback
@@ -121,31 +122,6 @@ def choose_point_in_spectral_box(
     return z_random, nearest
 
 
-class DemoController:
-    def __init__(self, base_controller: NNController, min_step_size: float, restart_threshold: float):
-        self.base_controller = base_controller
-        self.min_step_size = float(min_step_size)
-        self.restart_threshold = float(restart_threshold)
-
-    def predict(self, state_np: np.ndarray) -> tuple[float, bool]:
-        ds, need_restart = self.base_controller.predict(state_np)
-        return max(float(ds), self.min_step_size), bool(need_restart)
-
-    def predict_with_info(self, state_np: np.ndarray) -> tuple[float, bool, dict]:
-        if hasattr(self.base_controller, "predict_with_info"):
-            ds, _, info = self.base_controller.predict_with_info(state_np)
-        else:
-            ds, _ = self.base_controller.predict(state_np)
-            info = {}
-        ds = max(float(ds), self.min_step_size)
-        info = dict(info)
-        info["min_step_size_applied"] = self.min_step_size
-        restart_prob = float(info.get("restart_prob", 0.0))
-        info["restart_threshold"] = self.restart_threshold
-        need_restart = bool(restart_prob >= self.restart_threshold)
-        return ds, need_restart, info
-
-
 def load_controller(checkpoint_path: str, config: dict) -> NNController:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     controller = build_controller_from_checkpoint(
@@ -214,9 +190,10 @@ def main():
             if args.min_step_size is not None
             else config["controller"]["step_size_min"]
         )
-        controller = DemoController(
+        controller = AdaptiveInferenceController(
             base_controller,
             min_step_size=min_step_size,
+            max_step_size=config["controller"].get("step_size_max"),
             restart_threshold=float(args.restart_threshold),
         )
         target_epsilon = float(config["ode"]["epsilon"])

@@ -41,7 +41,7 @@ class ExpertSolver:
         rtol: float = 1e-8,
         atol: float = 1e-8,
         max_step: float = 0.1,
-        first_step: float = 0.01,
+        first_step: float = 0.03,
         drift_threshold: float = 1e-4,
         closure_tol: float = 1e-3,
         min_steps_before_restart: int = 5,
@@ -50,6 +50,11 @@ class ExpertSolver:
         projection_tol: float = 1e-8,
         min_step_size: float = 1e-6,
         max_backtracks: int = 8,
+        proposal_growth: float = 1.6,
+        nominal_growth: float = 1.2,
+        projection_growth: float = 1.05,
+        mild_backtrack_shrink: float = 0.9,
+        strong_backtrack_shrink: float = 0.7,
         solver: Optional[PseudoinverseSolver] = None,
         svd_solver=None,
     ):
@@ -68,6 +73,11 @@ class ExpertSolver:
         self.projection_tol = float(projection_tol)
         self.min_step_size = float(min_step_size)
         self.max_backtracks = int(max_backtracks)
+        self.proposal_growth = float(proposal_growth)
+        self.nominal_growth = float(nominal_growth)
+        self.projection_growth = float(projection_growth)
+        self.mild_backtrack_shrink = float(mild_backtrack_shrink)
+        self.strong_backtrack_shrink = float(strong_backtrack_shrink)
         self.svd_solver = svd_solver or smallest_singular_triplet
         self.linear_solver = solver or PseudoinverseSolver()
         self.ode = ManifoldODE(self.A, self.epsilon, solver=self.linear_solver)
@@ -255,14 +265,22 @@ class ExpertSolver:
 
         raise RuntimeError("Unable to advance a teacher step while remaining on the epsilon contour.")
 
+    def _propose_trial_step(self, step_hint: Optional[float]) -> float:
+        if step_hint is None:
+            return float(np.clip(self.first_step, self.min_step_size, self.max_step))
+        base_step = max(float(step_hint), self.min_step_size)
+        return float(np.clip(max(base_step * self.proposal_growth, self.first_step), self.min_step_size, self.max_step))
+
     def _adapt_next_step_size(self, current_step_size: float, backtracks: int, applied_projection: bool) -> float:
         next_step = float(current_step_size)
-        if backtracks > 0:
-            next_step *= 0.8
+        if backtracks >= 2:
+            next_step *= self.strong_backtrack_shrink
+        elif backtracks == 1:
+            next_step *= self.mild_backtrack_shrink
         elif applied_projection:
-            next_step *= 1.0
+            next_step *= self.projection_growth
         else:
-            next_step *= 1.1
+            next_step *= self.nominal_growth
         return float(np.clip(next_step, self.min_step_size, self.max_step))
 
     def _restart_reason(self, z: complex, u: np.ndarray, v: np.ndarray, steps_since_restart: int) -> Tuple[int, Optional[str], float, float, float]:
@@ -309,11 +327,12 @@ class ExpertSolver:
             )
 
         try:
+            trial_step = self._propose_trial_step(first_step_hint)
             z_next, u_next, v_next, ds_expert, step_info = self._advance_projected_step(
                 z=z,
                 u=u,
                 v=v,
-                ds=max(first_step_hint or self.first_step, self.min_step_size),
+                ds=trial_step,
             )
         except RuntimeError:
             _, u_exact, v_exact = self.svd_solver(self.A, z)

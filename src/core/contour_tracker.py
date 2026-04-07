@@ -295,6 +295,8 @@ class ContourTracker:
         }
 
     def track(self, z0: complex, max_steps: int = 1000, step_callback=None) -> Dict:
+        if self.controller is not None and hasattr(self.controller, "reset"):
+            self.controller.reset()
         z0, sigma_at_start = self._project_initial_point(z0)
         u, v = self.initialize(z0)
         state = TrackerState(
@@ -411,6 +413,18 @@ class ContourTracker:
                         "steps_since_restart": int(state.steps_since_restart),
                         "controller_info": controller_info,
                         "features": features.copy(),
+                    }
+                )
+            if self.controller is not None and hasattr(self.controller, "observe_step"):
+                self.controller.observe_step(
+                    {
+                        "step": step,
+                        "need_restart": bool(need_restart),
+                        "applied_restart": applied_restart,
+                        "applied_projection": applied_projection,
+                        "backtracks": int(step_diagnostics["backtracks"]),
+                        "sigma_error": float(sigma_error_before_projection),
+                        "controller_info": controller_info,
                     }
                 )
 
