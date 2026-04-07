@@ -6,7 +6,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 from scipy.optimize import brentq
 
-from src.nn.features import extract_features
+from src.nn.features import assemble_controller_features, extract_features
 from src.solvers.rk4 import rk4_triplet_step
 from src.utils.contour_init import project_to_contour, sigma_min_at
 from src.utils.svd import smallest_singular_triplet
@@ -18,6 +18,10 @@ class TrackerState:
     u: np.ndarray
     v: np.ndarray
     prev_gamma_arg: float | None = None
+    steps_since_restart: int = 0
+    prev_ds: float = 0.0
+    prev_applied_projection: bool = False
+    prev_applied_restart: bool = False
 
 
 class ContourTracker:
@@ -62,7 +66,7 @@ class ContourTracker:
     def extract_state_features(self, z, u, v, prev_state=None) -> np.ndarray:
         prev_gamma_arg = None if prev_state is None else prev_state.prev_gamma_arg
         prev_solver_iters = getattr(self.ode_system.solver, "get_iteration_count", lambda: 0)()
-        return extract_features(
+        base_features = extract_features(
             z=z,
             u=u,
             v=v,
@@ -70,6 +74,20 @@ class ContourTracker:
             epsilon=self.epsilon,
             prev_gamma_arg=prev_gamma_arg,
             prev_solver_iters=prev_solver_iters,
+        )
+        controller_model = getattr(self.controller, "base_controller", self.controller)
+        input_dim = int(getattr(controller_model, "input_dim", len(base_features)))
+        steps_since_restart = 0 if prev_state is None else int(prev_state.steps_since_restart)
+        prev_ds = 0.0 if prev_state is None else float(prev_state.prev_ds)
+        prev_applied_projection = False if prev_state is None else bool(prev_state.prev_applied_projection)
+        prev_applied_restart = False if prev_state is None else bool(prev_state.prev_applied_restart)
+        return assemble_controller_features(
+            base_features,
+            steps_since_restart=steps_since_restart,
+            prev_ds=prev_ds,
+            prev_applied_projection=prev_applied_projection,
+            prev_applied_restart=prev_applied_restart,
+            input_dim=input_dim,
         )
 
     def _closure_anchor(self, z0: complex) -> complex:
@@ -279,7 +297,16 @@ class ContourTracker:
     def track(self, z0: complex, max_steps: int = 1000, step_callback=None) -> Dict:
         z0, sigma_at_start = self._project_initial_point(z0)
         u, v = self.initialize(z0)
-        state = TrackerState(z=z0, u=u, v=v, prev_gamma_arg=None)
+        state = TrackerState(
+            z=z0,
+            u=u,
+            v=v,
+            prev_gamma_arg=None,
+            steps_since_restart=self.min_steps_between_restarts,
+            prev_ds=0.0,
+            prev_applied_projection=False,
+            prev_applied_restart=False,
+        )
         trajectory = [z0]
         u_history = [u.copy()]
         v_history = [v.copy()]
@@ -343,12 +370,21 @@ class ContourTracker:
             elif abs(z - closure_anchor) >= 1e-12:
                 prev_anchor_angle = float(np.angle(z - closure_anchor))
 
-            state = TrackerState(z=z, u=u, v=v, prev_gamma_arg=np.angle(np.vdot(u, v)))
+            steps_since_restart = 0 if applied_restart else steps_since_restart + 1
+            state = TrackerState(
+                z=z,
+                u=u,
+                v=v,
+                prev_gamma_arg=np.angle(np.vdot(u, v)),
+                steps_since_restart=steps_since_restart,
+                prev_ds=float(accepted_ds),
+                prev_applied_projection=applied_projection,
+                prev_applied_restart=applied_restart,
+            )
             trajectory.append(z)
             u_history.append(u.copy())
             v_history.append(v.copy())
             step_sizes.append(float(accepted_ds))
-            steps_since_restart += 1
 
             if step_callback is not None:
                 step_callback(
@@ -372,6 +408,7 @@ class ContourTracker:
                         "projection_distance": float(step_diagnostics.get("projection_distance", 0.0)),
                         "projection_expansions": int(step_diagnostics.get("projection_expansions", 0)),
                         "projection_mode": step_diagnostics.get("projection_mode", "none"),
+                        "steps_since_restart": int(state.steps_since_restart),
                         "controller_info": controller_info,
                         "features": features.copy(),
                     }

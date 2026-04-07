@@ -27,9 +27,10 @@ from src.utils.visualization import plot_pseudospectrum_background
 
 
 class TimedDemoController:
-    def __init__(self, base_controller: NNController, min_step_size: float):
+    def __init__(self, base_controller: NNController, min_step_size: float, restart_threshold: float):
         self.base_controller = base_controller
         self.min_step_size = float(min_step_size)
+        self.restart_threshold = float(restart_threshold)
 
     def predict(self, state_np: np.ndarray) -> tuple[float, bool]:
         ds, need_restart = self.base_controller.predict(state_np)
@@ -37,14 +38,17 @@ class TimedDemoController:
 
     def predict_with_info(self, state_np: np.ndarray) -> tuple[float, bool, dict]:
         if hasattr(self.base_controller, "predict_with_info"):
-            ds, need_restart, info = self.base_controller.predict_with_info(state_np)
+            ds, _, info = self.base_controller.predict_with_info(state_np)
         else:
-            ds, need_restart = self.base_controller.predict(state_np)
+            ds, _ = self.base_controller.predict(state_np)
             info = {}
         ds = max(float(ds), self.min_step_size)
         info = dict(info)
         info["min_step_size_applied"] = self.min_step_size
-        return ds, bool(need_restart), info
+        restart_prob = float(info.get("restart_prob", 0.0))
+        info["restart_threshold"] = self.restart_threshold
+        need_restart = bool(restart_prob >= self.restart_threshold)
+        return ds, need_restart, info
 
 
 def parse_args():
@@ -64,6 +68,7 @@ def parse_args():
     parser.add_argument("--box-padding", type=float, default=0.25)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--nn-min-step-size", type=float, default=None)
+    parser.add_argument("--restart-threshold", type=float, default=0.9)
     parser.add_argument("--baseline-initial-step-size", type=float, default=1e-2)
     parser.add_argument("--baseline-min-step-size", type=float, default=1e-6)
     parser.add_argument("--baseline-max-step-size", type=float, default=1e-1)
@@ -329,9 +334,10 @@ def main():
         )
         controller = load_controller(args.checkpoint, config, device=device)
         nn_controller = TimedDemoController(
-            controller,
-            min_step_size=float(args.nn_min_step_size if args.nn_min_step_size is not None else config["controller"]["step_size_min"]),
-        )
+        controller,
+        min_step_size=float(args.nn_min_step_size if args.nn_min_step_size is not None else config["controller"]["step_size_min"]),
+        restart_threshold=float(args.restart_threshold),
+    )
 
         nn_collector = StepDiagnosticsCollector(label="nn_plus_ode")
         nn_step_callback = make_step_callback(
@@ -526,6 +532,7 @@ def main():
             "point_sampler": args.point_sampler,
             "sample_mode": args.sample_mode,
             "training_epsilon": float(target_epsilon),
+            "restart_threshold": float(args.restart_threshold),
             "epsilon": float(epsilon),
             "epsilon_compute_seconds": epsilon_compute_seconds,
             "random_point": [float(np.real(z_random)), float(np.imag(z_random))],

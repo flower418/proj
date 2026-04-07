@@ -15,7 +15,7 @@ tracker:
   restart_drift_threshold: 1.0e-4
 
 controller:
-  input_dim: 10
+  input_dim: 14
   hidden_dims: [128, 128, 64]
   dropout: 0.05
   norm_type: layernorm

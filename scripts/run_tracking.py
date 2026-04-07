@@ -12,6 +12,7 @@ import _bootstrap  # noqa: F401
 from src.core.contour_tracker import ContourTracker
 from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
+from src.nn.controller import NNController
 from src.nn.controller import build_controller_from_checkpoint
 from src.utils.config import load_yaml_config
 from src.utils.contour_init import auto_select_contour_start, project_to_contour, sigma_min_at
@@ -48,6 +49,7 @@ def parse_args():
     parser.add_argument("--log-dir", default=None, help="Directory for runtime logs. Defaults near the output files.")
     parser.add_argument("--print-every", type=int, default=1, help="Print one step log every k steps. All steps are still saved to JSONL.")
     parser.add_argument("--quiet", action="store_true", help="Disable step-by-step console diagnostics while still saving logs to files.")
+    parser.add_argument("--restart-threshold", type=float, default=0.9, help="Controller restart probability threshold during inference.")
     return parser.parse_args()
 
 
@@ -63,6 +65,24 @@ def load_matrix(matrix_path: str) -> np.ndarray:
             return data[data.files[0]]
         raise ValueError("NPZ matrix file must contain key 'A' or a single array.")
     raise ValueError("Unsupported matrix file format. Use .npy or .npz.")
+
+
+class InferenceControllerAdapter:
+    def __init__(self, base_controller: NNController, restart_threshold: float):
+        self.base_controller = base_controller
+        self.restart_threshold = float(restart_threshold)
+        self.input_dim = int(getattr(base_controller, "input_dim", 10))
+
+    def predict(self, state_np: np.ndarray) -> tuple[float, bool]:
+        ds, need_restart, _ = self.predict_with_info(state_np)
+        return ds, need_restart
+
+    def predict_with_info(self, state_np: np.ndarray) -> tuple[float, bool, dict]:
+        ds, _, info = self.base_controller.predict_with_info(state_np)
+        info = dict(info)
+        restart_prob = float(info.get("restart_prob", 0.0))
+        info["restart_threshold"] = self.restart_threshold
+        return float(ds), bool(restart_prob >= self.restart_threshold), info
 
 
 def main():
@@ -122,13 +142,14 @@ def main():
         controller = None
         if args.checkpoint is not None:
             checkpoint = torch.load(args.checkpoint, map_location="cpu")
-            controller = build_controller_from_checkpoint(
+            base_controller = build_controller_from_checkpoint(
                 checkpoint,
                 config["controller"],
                 input_dim=int(config["controller"].get("input_dim", 7)),
             )
-            controller.load_state_dict(checkpoint["model_state_dict"])
-            controller.eval()
+            base_controller.load_state_dict(checkpoint["model_state_dict"])
+            base_controller.eval()
+            controller = InferenceControllerAdapter(base_controller, restart_threshold=float(args.restart_threshold))
 
         collector = StepDiagnosticsCollector(label="run_tracking")
         step_callback = make_step_callback(
@@ -191,6 +212,7 @@ def main():
             "step_log_path": str(run_logger.log_dir / "tracking_steps.jsonl"),
             "diagnostics_path": str(diagnostics_path),
             "diagnostics": diagnostics,
+            "restart_threshold": float(args.restart_threshold),
         }
         if args.result_out is not None:
             out_path = Path(args.result_out)

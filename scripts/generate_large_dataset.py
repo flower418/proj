@@ -10,8 +10,10 @@ from scipy.optimize import brentq
 
 import _bootstrap  # noqa: F401
 
+from src.core.contour_tracker import ContourTracker
+from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
-from src.nn.features import extract_features
+from src.nn.features import assemble_controller_features, extract_features
 from src.train.dagger_augmentation import DAggerAugmenter
 from src.train.expert_solver import ExpertSolver
 from src.utils.contour_init import project_to_contour, sigma_min_at
@@ -74,49 +76,133 @@ def generate_trajectory(
     max_steps: int = 200,
     solver_config: dict = None,
 ) -> List[Dict]:
-    """生成单条轨迹"""
+    """生成单条更接近推理分布的 teacher-forced 轨迹。"""
     solver = PseudoinverseSolver(**(solver_config or {}))
     expert = ExpertSolver(A=A, epsilon=epsilon, solver=solver)
+    tracker = ContourTracker(
+        A=A,
+        epsilon=epsilon,
+        ode_system=ManifoldODE(A, epsilon=epsilon, solver=solver),
+        controller=None,
+        fixed_step_size=expert.first_step,
+        closure_tol=expert.closure_tol,
+        min_steps_between_restarts=expert.min_steps_before_restart,
+        projection_tol=expert.projection_tol,
+        min_step_size=expert.min_step_size,
+        max_backtracks=expert.max_backtracks,
+    )
 
-    _, u, v = expert.svd_solver(A, z0)
-    u = u / max(np.linalg.norm(u), 1e-15)
-    v = v / max(np.linalg.norm(v), 1e-15)
-
-    z = z0
-    steps_since_restart = 0
+    u, v = tracker.initialize(z0)
+    z = complex(z0)
+    steps_since_restart = expert.min_steps_before_restart
     step_hint = expert.first_step
+    prev_gamma_arg = None
+    prev_ds = 0.0
+    prev_applied_projection = False
+    prev_applied_restart = False
     trajectory = []
+    path_length = 0.0
+    max_distance_from_start = 0.0
+    closure_anchor = tracker._closure_anchor(z0)
+    prev_anchor_angle = None if abs(z0 - closure_anchor) < 1e-12 else float(np.angle(z0 - closure_anchor))
+    winding_angle = 0.0
 
     for step_idx in range(max_steps):
-        result = expert._step_with_hint(z, u, v, steps_since_restart, step_hint)
+        expert_result = expert._step_with_hint(z, u, v, steps_since_restart, step_hint)
 
-        prev_gamma_arg = None if step_idx == 0 else float(np.angle(np.vdot(trajectory[-1]["u"], trajectory[-1]["v"])))
-        features = extract_features(
-            z=z, u=u, v=v, A=A, epsilon=epsilon,
+        base_features = extract_features(
+            z=z,
+            u=u,
+            v=v,
+            A=A,
+            epsilon=epsilon,
             prev_gamma_arg=prev_gamma_arg,
             prev_solver_iters=expert.ode.solver.get_iteration_count(),
         )
+        features = assemble_controller_features(
+            base_features,
+            steps_since_restart=steps_since_restart,
+            prev_ds=prev_ds,
+            prev_applied_projection=prev_applied_projection,
+            prev_applied_restart=prev_applied_restart,
+        )
 
-        trajectory.append({
+        step_record = {
             "z": z,
             "u": u.copy(),
             "v": v.copy(),
             "features": features,
-            "ds_expert": result.ds_expert,
-            "y_restart": result.y_restart,
-            "residual": result.residual,
-            "sigma_error": result.sigma_error,
-        })
+            "ds_expert": float(expert_result.ds_expert),
+            "y_restart": int(expert_result.y_restart),
+            "restart_reason": expert_result.restart_reason,
+            "residual": float(expert_result.residual),
+            "sigma_error": float(expert_result.sigma_error),
+            "steps_since_restart": int(steps_since_restart),
+            "prev_ds": float(prev_ds),
+            "prev_applied_projection": bool(prev_applied_projection),
+            "prev_applied_restart": bool(prev_applied_restart),
+        }
 
-        z, u, v = result.z_next, result.u_next, result.v_next
-        steps_since_restart = 0 if result.y_restart else steps_since_restart + 1
+        if expert_result.y_restart:
+            z_next, u_next, v_next = tracker.exact_svd_restart(z)
+            applied_projection = False
+            step_distance = 0.0
+        else:
+            z_next, u_next, v_next, _, step_info = tracker._advance_with_backtracking(
+                z=z,
+                u=u,
+                v=v,
+                ds=max(float(expert_result.ds_expert), expert.min_step_size),
+                use_restart_state=False,
+            )
+            applied_projection = bool(step_info["applied_projection"])
+            step_distance = float(np.abs(z_next - z))
+            path_length += step_distance
+            max_distance_from_start = max(max_distance_from_start, float(np.abs(z_next - z0)))
+            if prev_anchor_angle is not None and abs(z_next - closure_anchor) >= 1e-12:
+                current_anchor_angle = float(np.angle(z_next - closure_anchor))
+                delta = current_anchor_angle - prev_anchor_angle
+                delta = float(np.angle(np.exp(1j * delta)))
+                winding_angle += delta
+                prev_anchor_angle = current_anchor_angle
+            elif abs(z_next - closure_anchor) >= 1e-12:
+                prev_anchor_angle = float(np.angle(z_next - closure_anchor))
+
+        step_record.update(
+            {
+                "z_next": z_next,
+                "u_next": u_next.copy(),
+                "v_next": v_next.copy(),
+                "applied_projection": bool(applied_projection),
+                "step_distance": float(step_distance),
+                "path_length": float(path_length),
+                "max_distance_from_start": float(max_distance_from_start),
+                "winding_angle": float(winding_angle),
+            }
+        )
+        trajectory.append(step_record)
+
+        z, u, v = z_next, u_next, v_next
+        prev_gamma_arg = float(np.angle(np.vdot(u, v)))
+        prev_ds = 0.0 if expert_result.y_restart else float(expert_result.ds_expert)
+        prev_applied_projection = bool(applied_projection)
+        prev_applied_restart = bool(expert_result.y_restart)
+        steps_since_restart = 0 if expert_result.y_restart else steps_since_restart + 1
         step_hint = (
             max(expert.first_step, expert.min_step_size)
-            if result.y_restart
-            else float(result.suggested_next_step)
+            if expert_result.y_restart
+            else float(expert_result.suggested_next_step)
         )
 
-        if step_idx >= 10 and abs(z - z0) < expert.closure_tol:
+        if not expert_result.y_restart and tracker.check_closure(
+            z_current=z,
+            z_start=z0,
+            current_step=step_idx + 1,
+            path_length=path_length,
+            max_distance_from_start=max_distance_from_start,
+            winding_angle=winding_angle,
+            last_step_size=max(float(expert_result.ds_expert), tracker.min_step_size),
+        ):
             break
 
     return trajectory
@@ -195,6 +281,7 @@ def generate_diverse_dataset(
     all_records = []
     stats = {"total_samples": 0, "matrix_types": {}, "matrix_sizes": {}, "trajectories": 0, "restart_samples": 0}
     rng = np.random.default_rng(seed)
+    matrix_counter = 0
 
     for matrix_type in matrix_types:
         for n in matrix_sizes:
@@ -209,6 +296,8 @@ def generate_diverse_dataset(
 
                 # 生成矩阵
                 A = getattr(MatrixGenerator, matrix_type)(n, seed=len(all_records))
+                matrix_id = f"{matrix_type}_n{n}_m{matrix_counter:06d}"
+                matrix_counter += 1
 
                 # 生成多个起点
                 num_starts = max(2, target_samples // (len(matrix_types) * len(matrix_sizes) * trajectories_per_type * 50))
@@ -235,11 +324,14 @@ def generate_diverse_dataset(
 
                     try:
                         trajectory = generate_trajectory(A, epsilon, z0, max_steps)
+                        trajectory_id = f"{matrix_id}_s{start_idx:03d}"
 
                         # 添加原始记录
                         for record in trajectory:
                             record["matrix_type"] = matrix_type
                             record["matrix_size"] = n
+                            record["matrix_id"] = matrix_id
+                            record["trajectory_id"] = trajectory_id
                             record["epsilon"] = float(epsilon)
                             record["sample_mode"] = epsilon_mode
                             all_records.append(record)
@@ -253,6 +345,8 @@ def generate_diverse_dataset(
                             for record in augmented:
                                 record["matrix_type"] = matrix_type
                                 record["matrix_size"] = n
+                                record["matrix_id"] = matrix_id
+                                record["trajectory_id"] = trajectory_id
                                 record["source"] = "dagger"
                                 record["epsilon"] = float(epsilon)
                                 record["sample_mode"] = epsilon_mode
@@ -326,18 +420,53 @@ def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict 
     features = np.stack([r["features"] for r in records])
     ds_expert = np.array([r["ds_expert"] for r in records], dtype=np.float32)
     y_restart = np.array([r["y_restart"] for r in records], dtype=np.int64)
+    epsilon = np.array([r.get("epsilon", 0.0) for r in records], dtype=np.float32)
+    matrix_size = np.array([r.get("matrix_size", -1) for r in records], dtype=np.int64)
+    matrix_type = np.array([str(r.get("matrix_type", "")) for r in records], dtype=np.str_)
+    matrix_id = np.array([str(r.get("matrix_id", f"matrix_{idx}")) for idx, r in enumerate(records)], dtype=np.str_)
+    trajectory_id = np.array([str(r.get("trajectory_id", f"trajectory_{idx}")) for idx, r in enumerate(records)], dtype=np.str_)
+    sample_mode = np.array([str(r.get("sample_mode", "")) for r in records], dtype=np.str_)
+    source = np.array([str(r.get("source", "expert")) for r in records], dtype=np.str_)
 
-    np.savez(output_path / f"{name}.npz", features=features, ds_expert=ds_expert, y_restart=y_restart)
+    np.savez(
+        output_path / f"{name}.npz",
+        features=features,
+        ds_expert=ds_expert,
+        y_restart=y_restart,
+        epsilon=epsilon,
+        matrix_size=matrix_size,
+        matrix_type=matrix_type,
+        matrix_id=matrix_id,
+        trajectory_id=trajectory_id,
+        sample_mode=sample_mode,
+        source=source,
+    )
 
     # 保存划分
     n = len(records)
     rng = rng or np.random.default_rng(0)
-    indices = rng.permutation(n)
-    train_end, val_end = int(0.8 * n), int(0.9 * n)
+    unique_trajectories = np.asarray(np.unique(trajectory_id), dtype=np.str_)
+    if len(unique_trajectories) < 3:
+        indices = rng.permutation(n)
+        train_end, val_end = int(0.8 * n), int(0.9 * n)
+        train_indices = indices[:train_end]
+        val_indices = indices[train_end:val_end]
+        test_indices = indices[val_end:]
+    else:
+        rng.shuffle(unique_trajectories)
+        num_groups = len(unique_trajectories)
+        train_group_end = max(1, int(0.8 * num_groups))
+        val_group_end = max(train_group_end + 1, int(0.9 * num_groups))
+        train_groups = set(unique_trajectories[:train_group_end].tolist())
+        val_groups = set(unique_trajectories[train_group_end:val_group_end].tolist())
+        test_groups = set(unique_trajectories[val_group_end:].tolist())
+        train_indices = np.nonzero(np.isin(trajectory_id, list(train_groups)))[0]
+        val_indices = np.nonzero(np.isin(trajectory_id, list(val_groups)))[0]
+        test_indices = np.nonzero(np.isin(trajectory_id, list(test_groups)))[0]
     split_payload = {
-        "train_indices": indices[:train_end],
-        "val_indices": indices[train_end:val_end],
-        "test_indices": indices[val_end:],
+        "train_indices": train_indices,
+        "val_indices": val_indices,
+        "test_indices": test_indices,
     }
 
     np.savez(output_path / f"{name}_splits.npz", **split_payload)
@@ -349,9 +478,9 @@ def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict 
             json.dump(stats, f, indent=2)
 
         print(f"\n保存：{n} 样本")
-        print(f"  Train: {train_end} ({100*train_end/n:.1f}%)")
-        print(f"  Val: {val_end - train_end} ({100*(val_end-train_end)/n:.1f}%)")
-        print(f"  Test: {n - val_end} ({100*(n-val_end)/n:.1f}%)")
+        print(f"  Train: {len(train_indices)} ({100*len(train_indices)/n:.1f}%)")
+        print(f"  Val: {len(val_indices)} ({100*len(val_indices)/n:.1f}%)")
+        print(f"  Test: {len(test_indices)} ({100*len(test_indices)/n:.1f}%)")
         print(f"  重启样本：{stats['restart_samples']} ({100*stats['restart_samples']/n:.2f}%)")
 
 

@@ -366,6 +366,9 @@ class ExpertSolver:
         z = complex(z0)
         steps_since_restart = 0
         step_hint = self.first_step
+        prev_ds = 0.0
+        prev_applied_projection = False
+        prev_applied_restart = False
         trajectory = []
         start_time = time.perf_counter()
         path_length = 0.0
@@ -417,6 +420,10 @@ class ExpertSolver:
                 "sigma_error": result.sigma_error,
                 "gamma": result.gamma,
                 "step": step_idx,
+                "steps_since_restart": int(steps_since_restart),
+                "prev_ds": float(prev_ds),
+                "prev_applied_projection": bool(prev_applied_projection),
+                "prev_applied_restart": bool(prev_applied_restart),
                 "elapsed_seconds": elapsed_seconds,
                 "backtracks": result.backtracks,
                 "applied_projection": result.applied_projection,
@@ -431,6 +438,9 @@ class ExpertSolver:
                 step_callback(record)
 
             z, u, v = result.z_next, result.u_next, result.v_next
+            prev_ds = 0.0 if result.y_restart else float(result.ds_expert)
+            prev_applied_projection = bool(result.applied_projection)
+            prev_applied_restart = bool(result.y_restart)
             steps_since_restart = 0 if result.y_restart else steps_since_restart + 1
             step_hint = (
                 max(self.first_step, self.min_step_size)

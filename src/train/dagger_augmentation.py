@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.nn.features import extract_features
+from src.nn.features import assemble_controller_features, extract_features
 from src.train.expert_solver import ExpertSolver
 
 
@@ -38,12 +38,19 @@ class DAggerAugmenter:
         v_pert = v_pert * phase_factor
         return z_pert, u_pert, v_pert
 
-    def query_expert_at_perturbed_state(self, z_pert: complex, u_pert: np.ndarray, v_pert: np.ndarray, original_ds: float) -> Tuple[float, int, float, float]:
+    def query_expert_at_perturbed_state(
+        self,
+        z_pert: complex,
+        u_pert: np.ndarray,
+        v_pert: np.ndarray,
+        original_ds: float,
+        steps_since_restart: int,
+    ) -> Tuple[float, int, float, float]:
         result = self.expert._step_with_hint(
             z_pert,
             u_pert,
             v_pert,
-            steps_since_restart=self.expert.min_steps_before_restart,
+            steps_since_restart=steps_since_restart,
             first_step_hint=max(original_ds, 1e-8),
         )
         ds_value = max(result.ds_expert, 1e-8)
@@ -58,9 +65,13 @@ class DAggerAugmenter:
             for j in range(num_perturbations_per_point):
                 z_pert, u_pert, v_pert = self.perturb_state(point["z"], point["u"], point["v"], seed=i * 1000 + j)
                 ds_recover, y_restart, residual, sigma_error = self.query_expert_at_perturbed_state(
-                    z_pert, u_pert, v_pert, point["ds_expert"]
+                    z_pert,
+                    u_pert,
+                    v_pert,
+                    point["ds_expert"],
+                    steps_since_restart=int(point.get("steps_since_restart", self.expert.min_steps_before_restart)),
                 )
-                features = extract_features(
+                base_features = extract_features(
                     z=z_pert,
                     u=u_pert,
                     v=v_pert,
@@ -68,6 +79,15 @@ class DAggerAugmenter:
                     epsilon=self.expert.epsilon,
                     prev_gamma_arg=prev_gamma_arg,
                     prev_solver_iters=self.expert.ode.solver.get_iteration_count(),
+                )
+                input_dim = len(point["features"]) if "features" in point else None
+                features = assemble_controller_features(
+                    base_features,
+                    steps_since_restart=int(point.get("steps_since_restart", 0)),
+                    prev_ds=float(point.get("prev_ds", 0.0)),
+                    prev_applied_projection=bool(point.get("prev_applied_projection", False)),
+                    prev_applied_restart=bool(point.get("prev_applied_restart", False)),
+                    input_dim=input_dim,
                 )
                 augmented.append(
                     {
@@ -78,6 +98,10 @@ class DAggerAugmenter:
                         "y_restart": y_restart,
                         "features": features,
                         "step": point.get("step", -1),
+                        "steps_since_restart": int(point.get("steps_since_restart", 0)),
+                        "prev_ds": float(point.get("prev_ds", 0.0)),
+                        "prev_applied_projection": bool(point.get("prev_applied_projection", False)),
+                        "prev_applied_restart": bool(point.get("prev_applied_restart", False)),
                         "residual": residual,
                         "sigma_error": sigma_error,
                         "source": "dagger",

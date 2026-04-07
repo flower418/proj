@@ -62,3 +62,32 @@ def extract_features(
         )
         return features
     return np.array([f1, f2, f3, f4, f5, f6, f7, f8, f9, f10], dtype=np.float32)
+
+
+def assemble_controller_features(
+    base_features: np.ndarray,
+    steps_since_restart: int = 0,
+    prev_ds: float = 0.0,
+    prev_applied_projection: bool = False,
+    prev_applied_restart: bool = False,
+    max_steps_since_restart: int = 32,
+    input_dim: int | None = None,
+) -> np.ndarray:
+    base = np.asarray(base_features, dtype=np.float32).reshape(-1)
+    context = np.array(
+        [
+            float(np.clip(float(steps_since_restart) / max(float(max_steps_since_restart), 1.0), 0.0, 1.0)),
+            _log_normalize(float(prev_ds), min_exp=-8.0, max_exp=-1.0),
+            float(bool(prev_applied_projection)),
+            float(bool(prev_applied_restart)),
+        ],
+        dtype=np.float32,
+    )
+    full = np.concatenate([base, context], axis=0)
+    if input_dim is None or input_dim == len(full):
+        return full
+    if input_dim < len(full):
+        return full[:input_dim]
+    padded = np.zeros((input_dim,), dtype=np.float32)
+    padded[: len(full)] = full
+    return padded

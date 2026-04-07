@@ -67,6 +67,7 @@ def parse_args():
     parser.add_argument("--quiet", action="store_true", help="Disable step-by-step console diagnostics.")
     parser.add_argument("--require-closed", action="store_true", help="Raise an error if no closed contour is found.")
     parser.add_argument("--log-dir", default=None, help="Directory for runtime logs. Defaults to <output-dir>/logs.")
+    parser.add_argument("--restart-threshold", type=float, default=0.9, help="Controller restart probability threshold during inference.")
     return parser.parse_args()
 
 
@@ -121,9 +122,10 @@ def choose_point_in_spectral_box(
 
 
 class DemoController:
-    def __init__(self, base_controller: NNController, min_step_size: float):
+    def __init__(self, base_controller: NNController, min_step_size: float, restart_threshold: float):
         self.base_controller = base_controller
         self.min_step_size = float(min_step_size)
+        self.restart_threshold = float(restart_threshold)
 
     def predict(self, state_np: np.ndarray) -> tuple[float, bool]:
         ds, need_restart = self.base_controller.predict(state_np)
@@ -131,14 +133,17 @@ class DemoController:
 
     def predict_with_info(self, state_np: np.ndarray) -> tuple[float, bool, dict]:
         if hasattr(self.base_controller, "predict_with_info"):
-            ds, need_restart, info = self.base_controller.predict_with_info(state_np)
+            ds, _, info = self.base_controller.predict_with_info(state_np)
         else:
-            ds, need_restart = self.base_controller.predict(state_np)
+            ds, _ = self.base_controller.predict(state_np)
             info = {}
         ds = max(float(ds), self.min_step_size)
         info = dict(info)
         info["min_step_size_applied"] = self.min_step_size
-        return ds, bool(need_restart), info
+        restart_prob = float(info.get("restart_prob", 0.0))
+        info["restart_threshold"] = self.restart_threshold
+        need_restart = bool(restart_prob >= self.restart_threshold)
+        return ds, need_restart, info
 
 
 def load_controller(checkpoint_path: str, config: dict) -> NNController:
@@ -209,7 +214,11 @@ def main():
             if args.min_step_size is not None
             else config["controller"]["step_size_min"]
         )
-        controller = DemoController(base_controller, min_step_size=min_step_size)
+        controller = DemoController(
+            base_controller,
+            min_step_size=min_step_size,
+            restart_threshold=float(args.restart_threshold),
+        )
         target_epsilon = float(config["ode"]["epsilon"])
         base_step_budget = int(args.max_steps if args.max_steps is not None else config["tracker"]["max_steps"])
         budget_multipliers = [1, 2, 4, 8]
@@ -399,6 +408,7 @@ def main():
             "max_attempts": int(args.max_attempts),
             "step_budget_used": int(best_attempt["step_budget"]),
             "min_step_size": float(min_step_size),
+            "restart_threshold": float(args.restart_threshold),
             "epsilon": float(epsilon),
             "random_point": [float(np.real(z_random)), float(np.imag(z_random))],
             "sigma_at_random_point": float(sigma_min_at(A, z_random)),

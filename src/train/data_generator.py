@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from src.nn.features import extract_features
+from src.nn.features import assemble_controller_features, extract_features
 from src.train.dagger_augmentation import DAggerAugmenter
 from src.train.expert_solver import ExpertSolver
 from src.core.pseudoinverse import PseudoinverseSolver
@@ -57,7 +57,7 @@ class ExpertDataGenerator:
         records = []
         for idx, point in enumerate(trajectory):
             prev_gamma_arg = None if idx == 0 else float(np.angle(np.vdot(trajectory[idx - 1]["u"], trajectory[idx - 1]["v"])))
-            features = extract_features(
+            base_features = extract_features(
                 z=point["z"],
                 u=point["u"],
                 v=point["v"],
@@ -67,7 +67,13 @@ class ExpertDataGenerator:
                 prev_solver_iters=self.expert.ode.solver.get_iteration_count(),
             )
             record = dict(point)
-            record["features"] = features
+            record["features"] = assemble_controller_features(
+                base_features,
+                steps_since_restart=int(point.get("steps_since_restart", 0)),
+                prev_ds=float(point.get("prev_ds", 0.0)),
+                prev_applied_projection=bool(point.get("prev_applied_projection", False)),
+                prev_applied_restart=bool(point.get("prev_applied_restart", False)),
+            )
             record["source"] = "expert"
             records.append(record)
         return records
