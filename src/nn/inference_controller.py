@@ -27,10 +27,13 @@ class AdaptiveInferenceController:
         stable_growth_interval: int = 4,
         stable_restart_prob: float = 0.2,
         stable_sigma_error: float = 5.0e-5,
-        projection_shrink_factor: float = 0.7,
-        projection_ceiling_recovery: float = 1.08,
-        projection_free_recovery_steps: int = 3,
-        min_ceiling_ratio: float = 0.25,
+        projection_shrink_factor: float = 0.85,
+        projection_ceiling_recovery: float = 1.12,
+        projection_free_recovery_steps: int = 2,
+        min_ceiling_ratio: float = 0.4,
+        projection_penalty_distance_ratio: float = 0.12,
+        projection_penalty_sigma_error: float = 1.5e-4,
+        projection_penalty_streak: int = 3,
     ):
         self.base_controller = base_controller
         self.min_step_size = float(min_step_size)
@@ -47,6 +50,9 @@ class AdaptiveInferenceController:
         self.projection_ceiling_recovery = max(float(projection_ceiling_recovery), 1.0)
         self.projection_free_recovery_steps = max(int(projection_free_recovery_steps), 1)
         self.min_ceiling_ratio = min(max(float(min_ceiling_ratio), 0.01), 1.0)
+        self.projection_penalty_distance_ratio = max(float(projection_penalty_distance_ratio), 0.0)
+        self.projection_penalty_sigma_error = max(float(projection_penalty_sigma_error), 0.0)
+        self.projection_penalty_streak = max(int(projection_penalty_streak), 1)
         self.input_dim = int(getattr(base_controller, "input_dim", 10))
         self.reset()
 
@@ -132,13 +138,29 @@ class AdaptiveInferenceController:
             self._high_restart_streak = 0
 
         applied_projection = bool(info.get("applied_projection", False))
-        if applied_projection:
+        sigma_error = float(info.get("sigma_error", 0.0))
+        ds = max(float(info.get("ds", 0.0)), self.min_step_size)
+        projection_distance = float(info.get("projection_distance", 0.0))
+        projection_distance_ratio = projection_distance / max(ds, 1e-12)
+        severe_projection = bool(
+            applied_projection
+            and (
+                projection_distance_ratio >= self.projection_penalty_distance_ratio
+                or sigma_error >= self.projection_penalty_sigma_error
+            )
+        )
+
+        if severe_projection:
             self._projection_streak += 1
             self._projection_free_steps = 0
-            if self._base_step_ceiling is not None:
+            if self._base_step_ceiling is not None and self._projection_streak >= self.projection_penalty_streak:
                 min_ceiling = max(self.min_step_size, self._base_step_ceiling * self.min_ceiling_ratio)
                 current_ceiling = self._dynamic_step_ceiling if self._dynamic_step_ceiling is not None else self._base_step_ceiling
                 self._dynamic_step_ceiling = max(min_ceiling, current_ceiling * self.projection_shrink_factor)
+                self._projection_streak = 0
+        elif applied_projection:
+            self._projection_streak = max(self._projection_streak - 1, 0)
+            self._projection_free_steps += 1
         else:
             self._projection_streak = 0
             self._projection_free_steps += 1

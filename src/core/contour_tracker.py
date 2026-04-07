@@ -374,11 +374,13 @@ class ContourTracker:
                 self.controller.observe_step(
                     {
                         "step": step,
+                        "ds": float(accepted_ds),
                         "need_restart": bool(need_restart),
                         "applied_restart": applied_restart,
                         "applied_projection": applied_projection,
                         "backtracks": int(step_diagnostics["backtracks"]),
                         "sigma_error": float(sigma_error_before_projection),
+                        "projection_distance": float(step_diagnostics.get("projection_distance", 0.0)),
                         "controller_info": controller_info,
                     }
                 )
