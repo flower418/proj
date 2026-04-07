@@ -11,6 +11,7 @@ from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.solvers.rk4 import rk4_triplet_step
 from src.utils.contour_init import project_to_contour, sigma_min_at
+from src.utils.local_projection import project_to_contour_by_local_normal
 from src.utils.metrics import residual_norm
 from src.utils.svd import smallest_singular_triplet
 
@@ -130,68 +131,14 @@ class ExpertSolver:
         z_candidate: complex,
         search_radius: float,
     ) -> tuple[complex, np.ndarray, np.ndarray, dict] | None:
-        sigma_candidate, u_candidate, v_candidate = self.svd_solver(self.A, z_candidate)
-        u_candidate = u_candidate / max(np.linalg.norm(u_candidate), 1e-15)
-        v_candidate = v_candidate / max(np.linalg.norm(v_candidate), 1e-15)
-        sigma_error = abs(float(sigma_candidate) - self.epsilon)
-        if sigma_error <= max(self.projection_tol, 1e-10):
-            return z_candidate, u_candidate, v_candidate, {
-                "sigma": float(sigma_candidate),
-                "sigma_error": float(sigma_error),
-                "projection_distance": 0.0,
-                "projection_expansions": 0,
-                "projection_mode": "local_exact",
-            }
-
-        gamma = np.vdot(v_candidate, u_candidate)
-        gamma_norm = abs(gamma)
-        if gamma_norm < 1e-15:
-            return None
-        normal = gamma / gamma_norm
-
-        def objective(alpha: float) -> float:
-            return sigma_min_at(self.A, z_candidate + alpha * normal) - self.epsilon
-
-        f0 = float(sigma_candidate - self.epsilon)
-        step_scale = max(float(search_radius), self.min_step_size, 1e-6)
-        roots: list[tuple[float, float, int]] = []
-        for direction in (1.0, -1.0):
-            bound = direction * step_scale
-            f_bound = objective(bound)
-            expansions = 0
-            while f0 * f_bound > 0.0 and expansions < 12:
-                bound *= 2.0
-                f_bound = objective(bound)
-                expansions += 1
-            if f0 * f_bound > 0.0:
-                continue
-            try:
-                alpha = brentq(
-                    objective,
-                    min(0.0, bound),
-                    max(0.0, bound),
-                    xtol=min(self.projection_tol, 1e-8),
-                    maxiter=100,
-                )
-            except ValueError:
-                continue
-            roots.append((abs(alpha), alpha, expansions))
-
-        if not roots:
-            return None
-
-        _, alpha, expansions = min(roots, key=lambda item: item[0])
-        z_projected = z_candidate + alpha * normal
-        sigma_projected, u_projected, v_projected = self.svd_solver(self.A, z_projected)
-        u_projected = u_projected / max(np.linalg.norm(u_projected), 1e-15)
-        v_projected = v_projected / max(np.linalg.norm(v_projected), 1e-15)
-        return z_projected, u_projected, v_projected, {
-            "sigma": float(sigma_projected),
-            "sigma_error": float(abs(float(sigma_projected) - self.epsilon)),
-            "projection_distance": float(abs(alpha)),
-            "projection_expansions": int(expansions),
-            "projection_mode": "local_normal",
-        }
+        del search_radius
+        return project_to_contour_by_local_normal(
+            A=self.A,
+            epsilon=self.epsilon,
+            z_candidate=z_candidate,
+            svd_solver=self.svd_solver,
+            projection_tol=self.projection_tol,
+        )
 
     def _advance_projected_step(
         self,

@@ -156,6 +156,7 @@ def main():
             controller=controller,
             fixed_step_size=config["ode"]["initial_step_size"],
             closure_tol=config["tracker"]["closure_tol"],
+            integration_method="heun",
         )
         result = tracker.track(z0=z0, max_steps=max_steps, step_callback=step_callback)
         diagnostics = collector.summary()

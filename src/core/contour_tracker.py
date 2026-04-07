@@ -7,8 +7,9 @@ import numpy as np
 from scipy.optimize import brentq
 
 from src.nn.features import assemble_controller_features, extract_features
-from src.solvers.rk4 import rk4_triplet_step
+from src.solvers.rk4 import heun_triplet_step, rk4_triplet_step
 from src.utils.contour_init import project_to_contour, sigma_min_at
+from src.utils.local_projection import project_to_contour_by_local_normal
 from src.utils.svd import smallest_singular_triplet
 
 
@@ -40,6 +41,7 @@ class ContourTracker:
         projection_tol: float = 1e-4,
         min_step_size: float = 1e-6,
         max_backtracks: int = 8,
+        integration_method: str = "rk4",
     ):
         self.A = np.asarray(A, dtype=np.complex128)
         self.epsilon = float(epsilon)
@@ -54,6 +56,13 @@ class ContourTracker:
         self.projection_tol = float(projection_tol)
         self.min_step_size = float(min_step_size)
         self.max_backtracks = int(max_backtracks)
+        self.integration_method = str(integration_method).lower()
+        if self.integration_method == "rk4":
+            self.triplet_stepper = rk4_triplet_step
+        elif self.integration_method in {"heun", "rk2"}:
+            self.triplet_stepper = heun_triplet_step
+        else:
+            raise ValueError(f"Unsupported integration_method: {integration_method}")
 
     def initialize(self, z0: complex) -> Tuple[np.ndarray, np.ndarray]:
         _, u0, v0 = self.svd_solver(self.A, z0)
@@ -137,68 +146,14 @@ class ContourTracker:
         z_candidate: complex,
         search_radius: float,
     ) -> tuple[complex, np.ndarray, np.ndarray, dict] | None:
-        sigma_candidate, u_candidate, v_candidate = self.svd_solver(self.A, z_candidate)
-        sigma_error = abs(sigma_candidate - self.epsilon)
-        if sigma_error <= max(self.projection_tol, 1e-10):
-            u_candidate = u_candidate / max(np.linalg.norm(u_candidate), 1e-15)
-            v_candidate = v_candidate / max(np.linalg.norm(v_candidate), 1e-15)
-            return z_candidate, u_candidate, v_candidate, {
-                "sigma": float(sigma_candidate),
-                "sigma_error": float(sigma_error),
-                "projection_distance": 0.0,
-                "projection_expansions": 0,
-                "projection_mode": "local_exact",
-            }
-
-        gamma_bar = np.vdot(v_candidate, u_candidate)
-        gamma_norm = np.abs(gamma_bar)
-        if gamma_norm < 1e-15:
-            return None
-        normal = gamma_bar / gamma_norm
-
-        def objective(alpha: float) -> float:
-            return sigma_min_at(self.A, z_candidate + alpha * normal) - self.epsilon
-
-        f0 = float(sigma_candidate - self.epsilon)
-        step_scale = max(float(search_radius), self.min_step_size, 1e-6)
-        roots: list[tuple[float, float, int]] = []
-        for direction in (1.0, -1.0):
-            bound = direction * step_scale
-            f_bound = objective(bound)
-            expansions = 0
-            while f0 * f_bound > 0.0 and expansions < 12:
-                bound *= 2.0
-                f_bound = objective(bound)
-                expansions += 1
-            if f0 * f_bound > 0.0:
-                continue
-            try:
-                alpha = brentq(
-                    objective,
-                    min(0.0, bound),
-                    max(0.0, bound),
-                    xtol=min(self.projection_tol, 1e-8),
-                    maxiter=100,
-                )
-            except ValueError:
-                continue
-            roots.append((abs(alpha), alpha, expansions))
-
-        if not roots:
-            return None
-
-        _, alpha, expansions = min(roots, key=lambda item: item[0])
-        z_projected = z_candidate + alpha * normal
-        sigma_projected, u_projected, v_projected = self.svd_solver(self.A, z_projected)
-        u_projected = u_projected / max(np.linalg.norm(u_projected), 1e-15)
-        v_projected = v_projected / max(np.linalg.norm(v_projected), 1e-15)
-        return z_projected, u_projected, v_projected, {
-            "sigma": float(sigma_projected),
-            "sigma_error": float(abs(sigma_projected - self.epsilon)),
-            "projection_distance": float(abs(alpha)),
-            "projection_expansions": int(expansions),
-            "projection_mode": "local_normal",
-        }
+        del search_radius
+        return project_to_contour_by_local_normal(
+            A=self.A,
+            epsilon=self.epsilon,
+            z_candidate=z_candidate,
+            svd_solver=self.svd_solver,
+            projection_tol=self.projection_tol,
+        )
 
     def _advance_with_backtracking(
         self,
@@ -220,7 +175,7 @@ class ContourTracker:
         last_candidate = None
 
         for backtrack_idx in range(self.max_backtracks + 1):
-            z_candidate, u_candidate, v_candidate = rk4_triplet_step(
+            z_candidate, u_candidate, v_candidate = self.triplet_stepper(
                 self.ode_system.get_full_derivatives,
                 z,
                 u_base,
