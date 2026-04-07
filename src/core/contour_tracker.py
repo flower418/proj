@@ -4,8 +4,6 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import numpy as np
-from scipy.optimize import brentq
-
 from src.nn.features import assemble_controller_features, extract_features
 from src.solvers.rk4 import heun_triplet_step, rk4_triplet_step
 from src.utils.contour_init import project_to_contour, sigma_min_at
@@ -61,6 +59,8 @@ class ContourTracker:
             self.triplet_stepper = rk4_triplet_step
         elif self.integration_method in {"heun", "rk2"}:
             self.triplet_stepper = heun_triplet_step
+        elif self.integration_method == "tangent":
+            self.triplet_stepper = None
         else:
             raise ValueError(f"Unsupported integration_method: {integration_method}")
 
@@ -145,6 +145,9 @@ class ContourTracker:
         self,
         z_candidate: complex,
         search_radius: float,
+        sigma_candidate: float | None = None,
+        u_candidate: np.ndarray | None = None,
+        v_candidate: np.ndarray | None = None,
     ) -> tuple[complex, np.ndarray, np.ndarray, dict] | None:
         del search_radius
         return project_to_contour_by_local_normal(
@@ -153,6 +156,29 @@ class ContourTracker:
             z_candidate=z_candidate,
             svd_solver=self.svd_solver,
             projection_tol=self.projection_tol,
+            sigma_current=sigma_candidate,
+            u_current=u_candidate,
+            v_current=v_candidate,
+        )
+
+    def _predict_candidate_state(
+        self,
+        z: complex,
+        u: np.ndarray,
+        v: np.ndarray,
+        ds: float,
+    ) -> tuple[complex, np.ndarray, np.ndarray]:
+        if self.integration_method == "tangent":
+            dz_ds = self.ode_system.compute_dz_ds(z, u, v)
+            return z + ds * dz_ds, u.copy(), v.copy()
+        if self.triplet_stepper is None:
+            raise RuntimeError("triplet_stepper is not configured.")
+        return self.triplet_stepper(
+            self.ode_system.get_full_derivatives,
+            z,
+            u,
+            v,
+            ds,
         )
 
     def _advance_with_backtracking(
@@ -175,39 +201,47 @@ class ContourTracker:
         last_candidate = None
 
         for backtrack_idx in range(self.max_backtracks + 1):
-            z_candidate, u_candidate, v_candidate = self.triplet_stepper(
-                self.ode_system.get_full_derivatives,
-                z,
-                u_base,
-                v_base,
-                ds_try,
+            z_candidate, u_candidate, v_candidate = self._predict_candidate_state(
+                z=z,
+                u=u_base,
+                v=v_base,
+                ds=ds_try,
             )
-            u_candidate = u_candidate / max(np.linalg.norm(u_candidate), 1e-15)
-            v_candidate = v_candidate / max(np.linalg.norm(v_candidate), 1e-15)
-
-            sigma_candidate = sigma_min_at(self.A, z_candidate)
+            sigma_candidate, u_exact, v_exact = self.svd_solver(self.A, z_candidate)
+            u_exact = u_exact / max(np.linalg.norm(u_exact), 1e-15)
+            v_exact = v_exact / max(np.linalg.norm(v_exact), 1e-15)
             sigma_error = abs(sigma_candidate - self.epsilon)
             last_error = sigma_error
-            last_candidate = (z_candidate, u_candidate, v_candidate, sigma_candidate, ds_try, backtrack_idx)
+            last_candidate = (z_candidate, u_exact, v_exact, sigma_candidate, ds_try, backtrack_idx)
 
             if sigma_error <= self.projection_tol:
-                return z_candidate, u_candidate, v_candidate, ds_try, {
+                return z_candidate, u_exact, v_exact, ds_try, {
                     "backtracks": backtrack_idx,
                     "applied_projection": False,
                     "sigma": float(sigma_candidate),
                     "sigma_error": float(sigma_error),
+                    "raw_sigma": float(sigma_candidate),
+                    "raw_sigma_error": float(sigma_error),
                     "projection_distance": 0.0,
                     "projection_expansions": 0,
                     "projection_mode": "none",
                 }
 
-            local_projection = self._project_to_contour_locally(z_candidate, search_radius=ds_try)
+            local_projection = self._project_to_contour_locally(
+                z_candidate,
+                search_radius=ds_try,
+                sigma_candidate=float(sigma_candidate),
+                u_candidate=u_exact,
+                v_candidate=v_exact,
+            )
             if local_projection is not None:
                 z_projected, u_projected, v_projected, projection_info = local_projection
                 if projection_info["sigma_error"] <= max(self.projection_tol, 1e-8):
                     return z_projected, u_projected, v_projected, ds_try, {
                         "backtracks": backtrack_idx,
                         "applied_projection": True,
+                        "raw_sigma": float(sigma_candidate),
+                        "raw_sigma_error": float(sigma_error),
                         **projection_info,
                     }
 
@@ -229,6 +263,8 @@ class ContourTracker:
                     "applied_projection": True,
                     "sigma": float(sigma_projected),
                     "sigma_error": float(abs(sigma_projected - self.epsilon)),
+                    "raw_sigma": float(sigma_candidate),
+                    "raw_sigma_error": float(sigma_error),
                     "projection_distance": float(abs(z_projected - z_candidate)),
                     "projection_expansions": 0,
                     "projection_mode": "radial_fallback",
@@ -247,6 +283,8 @@ class ContourTracker:
             "applied_projection": False,
             "sigma": float(sigma_candidate),
             "sigma_error": float(last_error if last_error is not None else 0.0),
+            "raw_sigma": float(sigma_candidate),
+            "raw_sigma_error": float(last_error if last_error is not None else 0.0),
         }
 
     def track(self, z0: complex, max_steps: int = 1000, step_callback=None) -> Dict:

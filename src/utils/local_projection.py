@@ -13,6 +13,9 @@ def project_to_contour_by_local_normal(
     projection_tol: float,
     max_newton_iters: int = 2,
     max_line_search_backtracks: int = 4,
+    sigma_current: float | None = None,
+    u_current: np.ndarray | None = None,
+    v_current: np.ndarray | None = None,
 ):
     """Cheap local normal correction using damped Newton steps.
 
@@ -21,7 +24,11 @@ def project_to_contour_by_local_normal(
     """
 
     tol = max(float(projection_tol), 1e-10)
-    sigma_current, u_current, v_current = svd_solver(A, z_candidate)
+    if sigma_current is None or u_current is None or v_current is None:
+        sigma_current, u_current, v_current = svd_solver(A, z_candidate)
+    sigma_current = float(sigma_current)
+    u_current = np.asarray(u_current, dtype=np.complex128)
+    v_current = np.asarray(v_current, dtype=np.complex128)
     u_current = u_current / max(np.linalg.norm(u_current), 1e-15)
     v_current = v_current / max(np.linalg.norm(v_current), 1e-15)
     current_error = abs(float(sigma_current) - float(epsilon))

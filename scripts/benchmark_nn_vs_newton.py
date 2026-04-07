@@ -332,7 +332,7 @@ def main():
             fixed_step_size=config["ode"]["initial_step_size"],
             closure_tol=config["tracker"]["closure_tol"],
             min_step_size=config["ode"]["min_step_size"],
-            integration_method="heun",
+            integration_method="tangent",
         )
         run_logger.log("running NN + ODE tracker")
         nn_t0 = time.perf_counter()

@@ -232,7 +232,7 @@ def main():
                 fixed_step_size=config["ode"]["initial_step_size"],
                 closure_tol=config["tracker"]["closure_tol"],
                 min_steps_between_restarts=5,
-                integration_method="heun",
+                integration_method="tangent",
             )
 
             best_local = None

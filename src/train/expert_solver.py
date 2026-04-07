@@ -5,8 +5,6 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from scipy.optimize import brentq
-
 from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.solvers.rk4 import rk4_triplet_step
@@ -130,6 +128,9 @@ class ExpertSolver:
         self,
         z_candidate: complex,
         search_radius: float,
+        sigma_candidate: float | None = None,
+        u_candidate: np.ndarray | None = None,
+        v_candidate: np.ndarray | None = None,
     ) -> tuple[complex, np.ndarray, np.ndarray, dict] | None:
         del search_radius
         return project_to_contour_by_local_normal(
@@ -138,6 +139,9 @@ class ExpertSolver:
             z_candidate=z_candidate,
             svd_solver=self.svd_solver,
             projection_tol=self.projection_tol,
+            sigma_current=sigma_candidate,
+            u_current=u_candidate,
+            v_current=v_candidate,
         )
 
     def _advance_projected_step(
@@ -173,7 +177,13 @@ class ExpertSolver:
                     "projection_mode": "none",
                 }
 
-            local_projection = self._project_to_contour_locally(z_candidate, search_radius=ds_try)
+            local_projection = self._project_to_contour_locally(
+                z_candidate,
+                search_radius=ds_try,
+                sigma_candidate=float(sigma_candidate),
+                u_candidate=u_exact,
+                v_candidate=v_exact,
+            )
             if local_projection is not None:
                 z_projected, u_projected, v_projected, projection_info = local_projection
                 if projection_info["sigma_error"] <= max(self.projection_tol, 1e-8):
