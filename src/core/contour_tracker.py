@@ -316,6 +316,10 @@ class ContourTracker:
         closed = False
         steps_since_restart = self.min_steps_between_restarts
         projection_indices = []
+        try:
+            prev_tangent_angle = float(np.angle(self.ode_system.compute_dz_ds(z0, u, v)))
+        except Exception:
+            prev_tangent_angle = None
 
         for step in range(max_steps):
             z_prev = state.z
@@ -365,6 +369,17 @@ class ContourTracker:
             elif abs(z - closure_anchor) >= 1e-12:
                 prev_anchor_angle = float(np.angle(z - closure_anchor))
 
+            tangent_turn = 0.0
+            try:
+                current_tangent_angle = float(np.angle(self.ode_system.compute_dz_ds(z, u, v)))
+            except Exception:
+                current_tangent_angle = prev_tangent_angle
+            if prev_tangent_angle is not None and current_tangent_angle is not None:
+                tangent_turn = float(
+                    abs(np.angle(np.exp(1j * (current_tangent_angle - prev_tangent_angle))))
+                )
+            prev_tangent_angle = current_tangent_angle
+
             steps_since_restart = 0 if applied_restart else steps_since_restart + 1
             state = TrackerState(
                 z=z,
@@ -404,6 +419,7 @@ class ContourTracker:
                         "projection_expansions": int(step_diagnostics.get("projection_expansions", 0)),
                         "projection_mode": step_diagnostics.get("projection_mode", "none"),
                         "steps_since_restart": int(state.steps_since_restart),
+                        "tangent_turn": float(tangent_turn),
                         "controller_info": controller_info,
                         "features": features.copy(),
                     }
@@ -419,6 +435,7 @@ class ContourTracker:
                         "backtracks": int(step_diagnostics["backtracks"]),
                         "sigma_error": float(sigma_error_before_projection),
                         "projection_distance": float(step_diagnostics.get("projection_distance", 0.0)),
+                        "tangent_turn": float(tangent_turn),
                         "controller_info": controller_info,
                     }
                 )

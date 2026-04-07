@@ -34,6 +34,9 @@ class AdaptiveInferenceController:
         projection_penalty_distance_ratio: float = 0.12,
         projection_penalty_sigma_error: float = 1.5e-4,
         projection_penalty_streak: int = 3,
+        curvature_turn_threshold: float = 0.14,
+        curvature_penalty_streak: int = 2,
+        curvature_shrink_factor: float = 0.9,
     ):
         self.base_controller = base_controller
         self.min_step_size = float(min_step_size)
@@ -53,6 +56,9 @@ class AdaptiveInferenceController:
         self.projection_penalty_distance_ratio = max(float(projection_penalty_distance_ratio), 0.0)
         self.projection_penalty_sigma_error = max(float(projection_penalty_sigma_error), 0.0)
         self.projection_penalty_streak = max(int(projection_penalty_streak), 1)
+        self.curvature_turn_threshold = max(float(curvature_turn_threshold), 0.0)
+        self.curvature_penalty_streak = max(int(curvature_penalty_streak), 1)
+        self.curvature_shrink_factor = min(max(float(curvature_shrink_factor), 0.1), 0.99)
         self.input_dim = int(getattr(base_controller, "input_dim", 10))
         self.reset()
 
@@ -64,6 +70,7 @@ class AdaptiveInferenceController:
         self._projection_streak = 0
         self._base_step_ceiling = None if self.max_step_size is None else float(self.max_step_size)
         self._dynamic_step_ceiling = self._base_step_ceiling
+        self._curvature_streak = 0
 
     def _clamp_step_size(self, ds: float) -> float:
         ds_value = max(float(ds), self.min_step_size)
@@ -141,6 +148,7 @@ class AdaptiveInferenceController:
         sigma_error = float(info.get("sigma_error", 0.0))
         ds = max(float(info.get("ds", 0.0)), self.min_step_size)
         projection_distance = float(info.get("projection_distance", 0.0))
+        tangent_turn = float(info.get("tangent_turn", 0.0))
         projection_distance_ratio = projection_distance / max(ds, 1e-12)
         severe_projection = bool(
             applied_projection
@@ -173,6 +181,16 @@ class AdaptiveInferenceController:
                     self._base_step_ceiling,
                     self._dynamic_step_ceiling * self.projection_ceiling_recovery,
                 )
+
+        if tangent_turn >= self.curvature_turn_threshold:
+            self._curvature_streak += 1
+            if self._base_step_ceiling is not None and self._curvature_streak >= self.curvature_penalty_streak:
+                min_ceiling = max(self.min_step_size, self._base_step_ceiling * self.min_ceiling_ratio)
+                current_ceiling = self._dynamic_step_ceiling if self._dynamic_step_ceiling is not None else self._base_step_ceiling
+                self._dynamic_step_ceiling = max(min_ceiling, current_ceiling * self.curvature_shrink_factor)
+                self._curvature_streak = 0
+        else:
+            self._curvature_streak = 0
 
         is_stable = (
             not bool(info.get("need_restart", False))
