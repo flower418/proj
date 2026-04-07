@@ -30,7 +30,7 @@ training:
   weight_decay: 1.0e-5
   epochs: 100
   lambda_step: 1.0
-  lambda_restart: 3.0
+  lambda_restart: 1.0
   alpha_restart: 0.75
   focal_gamma: 1.5
   gradient_clip_norm: 1.0

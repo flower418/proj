@@ -6,6 +6,7 @@ import numpy as np
 
 from src.nn.features import assemble_controller_features, extract_features
 from src.train.expert_solver import ExpertSolver
+from src.utils.contour_init import project_to_contour
 
 
 class DAggerAugmenter:
@@ -15,8 +16,10 @@ class DAggerAugmenter:
         self,
         expert_solver: ExpertSolver,
         noise_scales: Optional[Dict[str, float]] = None,
+        keep_restart_samples: bool = False,
     ):
         self.expert = expert_solver
+        self.keep_restart_samples = bool(keep_restart_samples)
         self.noise_scales = noise_scales or {
             "z_real": 1e-3,
             "z_imag": 1e-3,
@@ -46,13 +49,34 @@ class DAggerAugmenter:
         original_ds: float,
         steps_since_restart: int,
     ) -> Tuple[float, int, float, float]:
-        result = self.expert._step_with_hint(
-            z_pert,
-            u_pert,
-            v_pert,
-            steps_since_restart=steps_since_restart,
-            first_step_hint=max(original_ds, 1e-8),
-        )
+        try:
+            z_query, _ = project_to_contour(
+                self.expert.A,
+                self.expert.epsilon,
+                z_pert,
+                tol=min(self.expert.projection_tol, 1e-6),
+            )
+            _, u_query, v_query = self.expert.svd_solver(self.expert.A, z_query)
+            u_query = u_query / max(np.linalg.norm(u_query), 1e-15)
+            v_query = v_query / max(np.linalg.norm(v_query), 1e-15)
+        except ValueError:
+            z_query = z_pert
+            u_query = u_pert
+            v_query = v_pert
+
+        base_hint = max(float(original_ds), self.expert.first_step, self.expert.min_step_size)
+        result = None
+        for factor in (1.0, 0.5, 0.25, 0.125):
+            result = self.expert._step_with_hint(
+                z_query,
+                u_query,
+                v_query,
+                steps_since_restart=steps_since_restart,
+                first_step_hint=max(base_hint * factor, self.expert.min_step_size),
+            )
+            if result.y_restart == 0:
+                break
+        assert result is not None
         ds_value = max(result.ds_expert, 1e-8)
         return ds_value, result.y_restart, result.residual, result.sigma_error
 
@@ -71,6 +95,8 @@ class DAggerAugmenter:
                     point["ds_expert"],
                     steps_since_restart=int(point.get("steps_since_restart", self.expert.min_steps_before_restart)),
                 )
+                if y_restart == 1 and not self.keep_restart_samples:
+                    continue
                 base_features = extract_features(
                     z=z_pert,
                     u=u_pert,
