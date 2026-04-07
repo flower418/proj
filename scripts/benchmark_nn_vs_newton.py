@@ -51,9 +51,6 @@ def parse_args():
     parser.add_argument("--baseline-corrector-tol", type=float, default=1e-10)
     parser.add_argument("--baseline-max-corrector-iters", type=int, default=8)
     parser.add_argument("--baseline-max-step-halvings", type=int, default=8)
-    parser.add_argument("--reference-step-size", type=float, default=2e-3)
-    parser.add_argument("--reference-corrector-tol", type=float, default=1e-12)
-    parser.add_argument("--reference-max-steps", type=int, default=40000)
     parser.add_argument("--log-dir", default=None, help="Directory for runtime logs. Defaults to <output-dir>/logs.")
     parser.add_argument("--nn-log-every", type=int, default=50, help="Print one NN step log every k steps. All steps are still saved to JSONL.")
     parser.add_argument("--baseline-log-every", type=int, default=50, help="Print one Newton step log every k steps. All steps are still saved to JSONL.")
@@ -112,17 +109,13 @@ def save_comparison_plot(
     z_random: complex,
     nn_result: dict,
     baseline_result: dict,
-    reference_result: dict | None,
     nn_elapsed: float,
     baseline_elapsed: float,
-    reference_elapsed: float | None,
     save_path: Path,
 ) -> None:
     fig, ax = plt.subplots(figsize=(10, 8))
 
     combined = [np.asarray(nn_result["trajectory"], dtype=np.complex128), np.asarray(baseline_result["trajectory"], dtype=np.complex128)]
-    if reference_result is not None:
-        combined.append(np.asarray(reference_result["trajectory"], dtype=np.complex128))
     merged = np.concatenate(combined)
     real_margin = max(np.ptp(np.real(merged)) * 0.12, 1.0)
     imag_margin = max(np.ptp(np.imag(merged)) * 0.12, 1.0)
@@ -169,20 +162,6 @@ def save_comparison_plot(
                 pe.Normal(),
             ]
         )
-    if reference_result is not None:
-        ref_traj = np.asarray(reference_result["trajectory"], dtype=np.complex128)
-        ref_line, = ax.plot(
-            np.real(ref_traj),
-            np.imag(ref_traj),
-            color="black",
-            linewidth=1.6,
-            linestyle=":",
-            alpha=0.75,
-            label="Reference",
-            zorder=3,
-        )
-        ref_line.set_path_effects([pe.Stroke(linewidth=3.0, foreground="white", alpha=0.9), pe.Normal()])
-
     ax.scatter(np.real(z_random), np.imag(z_random), c="green", s=110, marker="o", edgecolors="black", linewidths=0.6, label="Random Point", zorder=6)
     ax.scatter(np.real(nn_traj[-1]), np.imag(nn_traj[-1]), c="tab:blue", s=70, marker="s", label="NN End", zorder=6)
     ax.scatter(np.real(base_traj[-1]), np.imag(base_traj[-1]), c="tab:orange", s=70, marker="D", label="Newton End", zorder=6)
@@ -195,8 +174,6 @@ def save_comparison_plot(
         f"NN + ODE: {nn_elapsed:.3f}s",
         f"Newton PC: {baseline_elapsed:.3f}s",
     ]
-    if reference_elapsed is not None:
-        time_lines.append(f"Reference: {reference_elapsed:.3f}s")
     ax.text(
         0.02,
         0.98,
@@ -372,27 +349,6 @@ def main():
             f"points={len(baseline_result['trajectory'])} failure_reason={baseline_result.get('failure_reason')}"
         )
 
-        reference_tracker = NewtonPredictorCorrectorTracker(
-            A=A,
-            epsilon=epsilon,
-            initial_step_size=args.reference_step_size,
-            min_step_size=args.reference_step_size,
-            max_step_size=args.reference_step_size,
-            corrector_tol=args.reference_corrector_tol,
-            max_corrector_iters=max(args.baseline_max_corrector_iters + 4, 12),
-            max_step_halvings=0,
-            closure_tol=config["tracker"]["closure_tol"],
-        )
-        run_logger.log("running high-precision reference tracker")
-        reference_t0 = time.perf_counter()
-        reference_result = reference_tracker.track(z0=z0, max_steps=args.reference_max_steps)
-        reference_elapsed = float(time.perf_counter() - reference_t0)
-        if not reference_result["closed"]:
-            reference_result = None
-            run_logger.log(f"reference tracker did not close elapsed={reference_elapsed:.3f}s")
-        else:
-            run_logger.log(f"reference tracker done elapsed={reference_elapsed:.3f}s")
-
         nn_diagnostics = nn_collector.summary()
         baseline_diagnostics = baseline_collector.summary()
         nn_diag_path = run_logger.write_json("nn_diagnostics_summary.json", nn_diagnostics)
@@ -425,23 +381,6 @@ def main():
         comparison = {
             "nn_vs_newton": contour_distance_metrics(nn_result["trajectory"], baseline_result["trajectory"]),
         }
-        if reference_result is not None:
-            reference_summary = summarize_tracker_result(reference_result)
-            reference_summary.update(compute_sigma_error_stats(A, epsilon, reference_result["trajectory"]))
-            reference_summary.update(
-                {
-                    "elapsed_seconds": reference_elapsed,
-                    "mode": "high_precision_newton_reference",
-                }
-            )
-            comparison["nn_vs_reference"] = contour_distance_metrics(nn_result["trajectory"], reference_result["trajectory"])
-            comparison["newton_vs_reference"] = contour_distance_metrics(baseline_result["trajectory"], reference_result["trajectory"])
-        else:
-            reference_summary = {
-                "closed": False,
-                "elapsed_seconds": reference_elapsed,
-                "mode": "high_precision_newton_reference",
-            }
 
         matrix_out = output_dir / "random_matrix.npy"
         plot_out = output_dir / "comparison_plot.png"
@@ -455,7 +394,6 @@ def main():
             traj_out,
             nn_trajectory=np.asarray(nn_result["trajectory"], dtype=np.complex128),
             baseline_trajectory=np.asarray(baseline_result["trajectory"], dtype=np.complex128),
-            reference_trajectory=None if reference_result is None else np.asarray(reference_result["trajectory"], dtype=np.complex128),
         )
         save_comparison_plot(
             A=A,
@@ -463,10 +401,8 @@ def main():
             z_random=z_random,
             nn_result=nn_result,
             baseline_result=baseline_result,
-            reference_result=reference_result,
             nn_elapsed=nn_elapsed,
             baseline_elapsed=baseline_elapsed,
-            reference_elapsed=reference_elapsed if reference_result is not None else None,
             save_path=plot_out,
         )
         save_single_method_plot(
@@ -519,7 +455,6 @@ def main():
             "nearest_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
             "nn_plus_ode": nn_summary,
             "newton_predictor_corrector": baseline_summary,
-            "reference": reference_summary,
             "comparison": comparison,
         }
         with summary_out.open("w", encoding="utf-8") as fh:
