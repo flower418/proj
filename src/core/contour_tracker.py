@@ -43,6 +43,9 @@ class ContourTracker:
         projection_defer_factor: float = 1.0,
         projection_defer_distance_ratio: float = 0.0,
         max_deferred_projection_steps: int = 0,
+        exact_triplet_refresh_interval: int = 0,
+        approx_triplet_sigma_tol: float | None = None,
+        approx_triplet_residual_tol: float | None = None,
     ):
         self.A = np.asarray(A, dtype=np.complex128)
         self.epsilon = float(epsilon)
@@ -61,6 +64,9 @@ class ContourTracker:
         self.projection_defer_factor = max(float(projection_defer_factor), 1.0)
         self.projection_defer_distance_ratio = max(float(projection_defer_distance_ratio), 0.0)
         self.max_deferred_projection_steps = max(int(max_deferred_projection_steps), 0)
+        self.exact_triplet_refresh_interval = max(int(exact_triplet_refresh_interval), 0)
+        self.approx_triplet_sigma_tol = None if approx_triplet_sigma_tol is None else max(float(approx_triplet_sigma_tol), 0.0)
+        self.approx_triplet_residual_tol = None if approx_triplet_residual_tol is None else max(float(approx_triplet_residual_tol), 0.0)
         if self.integration_method == "rk4":
             self.triplet_stepper = rk4_triplet_step
         elif self.integration_method in {"heun", "rk2"}:
@@ -187,6 +193,17 @@ class ContourTracker:
             ds,
         )
 
+    def _approximate_triplet_metrics(
+        self,
+        z_candidate: complex,
+        u_candidate: np.ndarray,
+        v_candidate: np.ndarray,
+    ) -> tuple[float, float]:
+        Mv = z_candidate * v_candidate - self.A @ v_candidate
+        sigma_approx = float(abs(np.vdot(u_candidate, Mv)))
+        residual = float(np.linalg.norm(Mv - self.epsilon * u_candidate))
+        return sigma_approx, residual
+
     def _advance_with_backtracking(
         self,
         z: complex,
@@ -195,6 +212,7 @@ class ContourTracker:
         ds: float,
         use_restart_state: bool,
         deferred_projection_streak: int = 0,
+        steps_since_exact_triplet_refresh: int = 0,
     ) -> Tuple[complex, np.ndarray, np.ndarray, float, dict]:
         if use_restart_state:
             _, u_base, v_base = self.exact_svd_restart(z)
@@ -214,6 +232,39 @@ class ContourTracker:
                 v=v_base,
                 ds=ds_try,
             )
+
+            can_use_approx_triplet = (
+                self.integration_method == "tangent"
+                and not use_restart_state
+                and self.exact_triplet_refresh_interval > 0
+                and steps_since_exact_triplet_refresh < self.exact_triplet_refresh_interval
+                and self.approx_triplet_sigma_tol is not None
+                and self.approx_triplet_residual_tol is not None
+            )
+            if can_use_approx_triplet:
+                sigma_approx, residual_approx = self._approximate_triplet_metrics(
+                    z_candidate=z_candidate,
+                    u_candidate=u_candidate,
+                    v_candidate=v_candidate,
+                )
+                sigma_error_approx = abs(sigma_approx - self.epsilon)
+                residual_limit = max(float(self.approx_triplet_residual_tol), 1.25 * max(ds_try, self.min_step_size))
+                if sigma_error_approx <= self.approx_triplet_sigma_tol and residual_approx <= residual_limit:
+                    return z_candidate, u_candidate, v_candidate, ds_try, {
+                        "backtracks": backtrack_idx,
+                        "applied_projection": False,
+                        "sigma": float(sigma_approx),
+                        "sigma_error": float(sigma_error_approx),
+                        "raw_sigma": float(sigma_approx),
+                        "raw_sigma_error": float(sigma_error_approx),
+                        "projection_distance": 0.0,
+                        "projection_expansions": 0,
+                        "projection_mode": "none",
+                        "triplet_refresh_mode": "approx_skip",
+                        "triplet_residual": float(residual_approx),
+                        "exact_triplet_refresh": False,
+                    }
+
             sigma_candidate, u_exact, v_exact = self.svd_solver(self.A, z_candidate)
             u_exact = u_exact / max(np.linalg.norm(u_exact), 1e-15)
             v_exact = v_exact / max(np.linalg.norm(v_exact), 1e-15)
@@ -232,6 +283,9 @@ class ContourTracker:
                     "projection_distance": 0.0,
                     "projection_expansions": 0,
                     "projection_mode": "none",
+                    "triplet_refresh_mode": "exact_svd",
+                    "triplet_residual": 0.0,
+                    "exact_triplet_refresh": True,
                 }
 
             gamma_norm = abs(np.vdot(v_exact, u_exact))
@@ -255,6 +309,9 @@ class ContourTracker:
                     "projection_expansions": 0,
                     "projection_mode": "deferred_accept",
                     "estimated_projection_distance": float(estimated_projection_distance),
+                    "triplet_refresh_mode": "exact_svd",
+                    "triplet_residual": 0.0,
+                    "exact_triplet_refresh": True,
                 }
 
             local_projection = self._project_to_contour_locally(
@@ -273,6 +330,9 @@ class ContourTracker:
                         "raw_sigma": float(sigma_candidate),
                         "raw_sigma_error": float(sigma_error),
                         **projection_info,
+                        "triplet_refresh_mode": "local_projection",
+                        "triplet_residual": 0.0,
+                        "exact_triplet_refresh": True,
                     }
 
             try:
@@ -298,6 +358,9 @@ class ContourTracker:
                     "projection_distance": float(abs(z_projected - z_candidate)),
                     "projection_expansions": 0,
                     "projection_mode": "radial_fallback",
+                    "triplet_refresh_mode": "radial_projection",
+                    "triplet_residual": 0.0,
+                    "exact_triplet_refresh": True,
                 }
 
             if ds_try <= self.min_step_size * (1.0 + 1e-12):
@@ -315,6 +378,9 @@ class ContourTracker:
             "sigma_error": float(last_error if last_error is not None else 0.0),
             "raw_sigma": float(sigma_candidate),
             "raw_sigma_error": float(last_error if last_error is not None else 0.0),
+            "triplet_refresh_mode": "exact_svd_fallback",
+            "triplet_residual": 0.0,
+            "exact_triplet_refresh": True,
         }
 
     def track(self, z0: complex, max_steps: int = 1000, step_callback=None) -> Dict:
@@ -347,6 +413,7 @@ class ContourTracker:
         steps_since_restart = self.min_steps_between_restarts
         projection_indices = []
         deferred_projection_streak = 0
+        steps_since_exact_triplet_refresh = 0
         try:
             prev_tangent_angle = float(np.angle(self.ode_system.compute_dz_ds(z0, u, v)))
         except Exception:
@@ -381,6 +448,7 @@ class ContourTracker:
                 ds=ds,
                 use_restart_state=applied_restart,
                 deferred_projection_streak=deferred_projection_streak,
+                steps_since_exact_triplet_refresh=steps_since_exact_triplet_refresh,
             )
             sigma_after_correction = float(step_diagnostics["sigma"])
             sigma_error_after_correction = float(step_diagnostics["sigma_error"])
@@ -394,6 +462,10 @@ class ContourTracker:
                 deferred_projection_streak += 1
             else:
                 deferred_projection_streak = 0
+            if bool(step_diagnostics.get("exact_triplet_refresh", True)):
+                steps_since_exact_triplet_refresh = 0
+            else:
+                steps_since_exact_triplet_refresh += 1
 
             step_distance = float(np.abs(z - state.z))
             path_length += step_distance
@@ -460,6 +532,9 @@ class ContourTracker:
                         "projection_expansions": int(step_diagnostics.get("projection_expansions", 0)),
                         "projection_mode": step_diagnostics.get("projection_mode", "none"),
                         "estimated_projection_distance": float(step_diagnostics.get("estimated_projection_distance", 0.0)),
+                        "triplet_refresh_mode": step_diagnostics.get("triplet_refresh_mode", "exact_svd"),
+                        "triplet_residual": float(step_diagnostics.get("triplet_residual", 0.0)),
+                        "steps_since_exact_triplet_refresh": int(steps_since_exact_triplet_refresh),
                         "steps_since_restart": int(state.steps_since_restart),
                         "tangent_turn": float(tangent_turn),
                         "controller_info": controller_info,

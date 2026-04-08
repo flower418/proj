@@ -107,6 +107,7 @@ class StepDiagnosticsCollector:
     max_sigma_error: float = 0.0
     total_raw_sigma_error: float = 0.0
     max_raw_sigma_error: float = 0.0
+    num_approx_triplet_skips: int = 0
     total_restart_prob: float = 0.0
     restart_prob_count: int = 0
 
@@ -139,6 +140,8 @@ class StepDiagnosticsCollector:
         self.max_sigma_error = max(self.max_sigma_error, sigma_error)
         self.total_raw_sigma_error += raw_sigma_error
         self.max_raw_sigma_error = max(self.max_raw_sigma_error, raw_sigma_error)
+        if str(info.get("triplet_refresh_mode", "")) == "approx_skip":
+            self.num_approx_triplet_skips += 1
 
         controller_info = info.get("controller_info")
         if isinstance(controller_info, dict) and controller_info.get("restart_prob") is not None:
@@ -168,6 +171,8 @@ class StepDiagnosticsCollector:
             "max_sigma_error": float(self.max_sigma_error),
             "mean_raw_sigma_error": float(self.total_raw_sigma_error / self.num_steps),
             "max_raw_sigma_error": float(self.max_raw_sigma_error),
+            "num_approx_triplet_skips": int(self.num_approx_triplet_skips),
+            "approx_triplet_skip_rate": float(self.num_approx_triplet_skips / self.num_steps),
             "mean_restart_prob": float(self.total_restart_prob / self.restart_prob_count) if self.restart_prob_count > 0 else None,
         }
 
@@ -217,6 +222,7 @@ def format_nn_step(info: dict[str, Any], label: str = "nn") -> str:
         f"wind={float(info.get('winding_angle', 0.0)):.4f} "
         f"raw_sigma_err={raw_sigma_error:.6e} "
         f"sigma_err={float(info.get('sigma_error', 0.0)):.6e} "
+        f"triplet={str(info.get('triplet_refresh_mode', 'exact_svd'))} "
         f"z={format_complex(complex(info.get('z_next', 0.0)))}"
     )
 

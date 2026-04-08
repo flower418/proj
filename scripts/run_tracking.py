@@ -160,6 +160,9 @@ def main():
             projection_defer_factor=4.0,
             projection_defer_distance_ratio=0.08,
             max_deferred_projection_steps=6,
+            exact_triplet_refresh_interval=2,
+            approx_triplet_sigma_tol=5.0e-4,
+            approx_triplet_residual_tol=1.0e-3,
         )
         result = tracker.track(z0=z0, max_steps=max_steps, step_callback=step_callback)
         diagnostics = collector.summary()
