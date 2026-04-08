@@ -157,6 +157,9 @@ def main():
             fixed_step_size=config["ode"]["initial_step_size"],
             closure_tol=config["tracker"]["closure_tol"],
             integration_method="tangent",
+            projection_defer_factor=4.0,
+            projection_defer_distance_ratio=0.08,
+            max_deferred_projection_steps=6,
         )
         result = tracker.track(z0=z0, max_steps=max_steps, step_callback=step_callback)
         diagnostics = collector.summary()

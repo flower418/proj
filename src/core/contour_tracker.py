@@ -40,6 +40,9 @@ class ContourTracker:
         min_step_size: float = 1e-6,
         max_backtracks: int = 8,
         integration_method: str = "rk4",
+        projection_defer_factor: float = 1.0,
+        projection_defer_distance_ratio: float = 0.0,
+        max_deferred_projection_steps: int = 0,
     ):
         self.A = np.asarray(A, dtype=np.complex128)
         self.epsilon = float(epsilon)
@@ -55,6 +58,9 @@ class ContourTracker:
         self.min_step_size = float(min_step_size)
         self.max_backtracks = int(max_backtracks)
         self.integration_method = str(integration_method).lower()
+        self.projection_defer_factor = max(float(projection_defer_factor), 1.0)
+        self.projection_defer_distance_ratio = max(float(projection_defer_distance_ratio), 0.0)
+        self.max_deferred_projection_steps = max(int(max_deferred_projection_steps), 0)
         if self.integration_method == "rk4":
             self.triplet_stepper = rk4_triplet_step
         elif self.integration_method in {"heun", "rk2"}:
@@ -188,6 +194,7 @@ class ContourTracker:
         v: np.ndarray,
         ds: float,
         use_restart_state: bool,
+        deferred_projection_streak: int = 0,
     ) -> Tuple[complex, np.ndarray, np.ndarray, float, dict]:
         if use_restart_state:
             _, u_base, v_base = self.exact_svd_restart(z)
@@ -225,6 +232,29 @@ class ContourTracker:
                     "projection_distance": 0.0,
                     "projection_expansions": 0,
                     "projection_mode": "none",
+                }
+
+            gamma_norm = abs(np.vdot(v_exact, u_exact))
+            estimated_projection_distance = sigma_error / max(gamma_norm, 1e-12)
+            relaxed_projection_tol = self.projection_tol * self.projection_defer_factor
+            allow_deferred_projection = (
+                self.max_deferred_projection_steps > 0
+                and deferred_projection_streak < self.max_deferred_projection_steps
+                and sigma_error <= relaxed_projection_tol
+                and estimated_projection_distance <= self.projection_defer_distance_ratio * max(ds_try, self.min_step_size)
+            )
+            if allow_deferred_projection:
+                return z_candidate, u_exact, v_exact, ds_try, {
+                    "backtracks": backtrack_idx,
+                    "applied_projection": False,
+                    "sigma": float(sigma_candidate),
+                    "sigma_error": float(sigma_error),
+                    "raw_sigma": float(sigma_candidate),
+                    "raw_sigma_error": float(sigma_error),
+                    "projection_distance": 0.0,
+                    "projection_expansions": 0,
+                    "projection_mode": "deferred_accept",
+                    "estimated_projection_distance": float(estimated_projection_distance),
                 }
 
             local_projection = self._project_to_contour_locally(
@@ -316,6 +346,7 @@ class ContourTracker:
         closed = False
         steps_since_restart = self.min_steps_between_restarts
         projection_indices = []
+        deferred_projection_streak = 0
         try:
             prev_tangent_angle = float(np.angle(self.ode_system.compute_dz_ds(z0, u, v)))
         except Exception:
@@ -349,12 +380,20 @@ class ContourTracker:
                 state.v,
                 ds=ds,
                 use_restart_state=applied_restart,
+                deferred_projection_streak=deferred_projection_streak,
             )
-            sigma_before_projection = float(step_diagnostics["sigma"])
-            sigma_error_before_projection = float(step_diagnostics["sigma_error"])
+            sigma_after_correction = float(step_diagnostics["sigma"])
+            sigma_error_after_correction = float(step_diagnostics["sigma_error"])
+            raw_sigma = float(step_diagnostics.get("raw_sigma", sigma_after_correction))
+            raw_sigma_error = float(step_diagnostics.get("raw_sigma_error", sigma_error_after_correction))
             applied_projection = bool(step_diagnostics["applied_projection"])
             if applied_projection:
                 projection_indices.append(len(trajectory))
+                deferred_projection_streak = 0
+            elif step_diagnostics.get("projection_mode") == "deferred_accept":
+                deferred_projection_streak += 1
+            else:
+                deferred_projection_streak = 0
 
             step_distance = float(np.abs(z - state.z))
             path_length += step_distance
@@ -411,13 +450,16 @@ class ContourTracker:
                         "path_length": float(path_length),
                         "max_distance_from_start": float(max_distance_from_start),
                         "winding_angle": float(winding_angle),
-                        "sigma": float(sigma_before_projection),
-                        "sigma_error": float(sigma_error_before_projection),
+                        "sigma": float(sigma_after_correction),
+                        "sigma_error": float(sigma_error_after_correction),
+                        "raw_sigma": float(raw_sigma),
+                        "raw_sigma_error": float(raw_sigma_error),
                         "applied_projection": applied_projection,
                         "backtracks": int(step_diagnostics["backtracks"]),
                         "projection_distance": float(step_diagnostics.get("projection_distance", 0.0)),
                         "projection_expansions": int(step_diagnostics.get("projection_expansions", 0)),
                         "projection_mode": step_diagnostics.get("projection_mode", "none"),
+                        "estimated_projection_distance": float(step_diagnostics.get("estimated_projection_distance", 0.0)),
                         "steps_since_restart": int(state.steps_since_restart),
                         "tangent_turn": float(tangent_turn),
                         "controller_info": controller_info,
@@ -433,7 +475,8 @@ class ContourTracker:
                         "applied_restart": applied_restart,
                         "applied_projection": applied_projection,
                         "backtracks": int(step_diagnostics["backtracks"]),
-                        "sigma_error": float(sigma_error_before_projection),
+                        "sigma_error": float(sigma_error_after_correction),
+                        "raw_sigma_error": float(raw_sigma_error),
                         "projection_distance": float(step_diagnostics.get("projection_distance", 0.0)),
                         "tangent_turn": float(tangent_turn),
                         "controller_info": controller_info,

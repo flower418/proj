@@ -146,6 +146,7 @@ class AdaptiveInferenceController:
 
         applied_projection = bool(info.get("applied_projection", False))
         sigma_error = float(info.get("sigma_error", 0.0))
+        raw_sigma_error = float(info.get("raw_sigma_error", sigma_error))
         ds = max(float(info.get("ds", 0.0)), self.min_step_size)
         projection_distance = float(info.get("projection_distance", 0.0))
         tangent_turn = float(info.get("tangent_turn", 0.0))
@@ -154,7 +155,7 @@ class AdaptiveInferenceController:
             applied_projection
             and (
                 projection_distance_ratio >= self.projection_penalty_distance_ratio
-                or sigma_error >= self.projection_penalty_sigma_error
+                or raw_sigma_error >= self.projection_penalty_sigma_error
             )
         )
 
@@ -196,6 +197,6 @@ class AdaptiveInferenceController:
             not bool(info.get("need_restart", False))
             and not applied_projection
             and int(info.get("backtracks", 0)) == 0
-            and float(info.get("sigma_error", 0.0)) <= self.stable_sigma_error
+            and raw_sigma_error <= self.stable_sigma_error
         )
         self._stable_steps = self._stable_steps + 1 if is_stable else 0

@@ -105,6 +105,8 @@ class StepDiagnosticsCollector:
     max_backtracks: int = 0
     total_sigma_error: float = 0.0
     max_sigma_error: float = 0.0
+    total_raw_sigma_error: float = 0.0
+    max_raw_sigma_error: float = 0.0
     total_restart_prob: float = 0.0
     restart_prob_count: int = 0
 
@@ -132,8 +134,11 @@ class StepDiagnosticsCollector:
             self.num_backtracked_steps += 1
 
         sigma_error = float(info.get("sigma_error", 0.0))
+        raw_sigma_error = float(info.get("raw_sigma_error", sigma_error))
         self.total_sigma_error += sigma_error
         self.max_sigma_error = max(self.max_sigma_error, sigma_error)
+        self.total_raw_sigma_error += raw_sigma_error
+        self.max_raw_sigma_error = max(self.max_raw_sigma_error, raw_sigma_error)
 
         controller_info = info.get("controller_info")
         if isinstance(controller_info, dict) and controller_info.get("restart_prob") is not None:
@@ -161,6 +166,8 @@ class StepDiagnosticsCollector:
             "max_backtracks": int(self.max_backtracks),
             "mean_sigma_error": float(self.total_sigma_error / self.num_steps),
             "max_sigma_error": float(self.max_sigma_error),
+            "mean_raw_sigma_error": float(self.total_raw_sigma_error / self.num_steps),
+            "max_raw_sigma_error": float(self.max_raw_sigma_error),
             "mean_restart_prob": float(self.total_restart_prob / self.restart_prob_count) if self.restart_prob_count > 0 else None,
         }
 
@@ -193,6 +200,7 @@ def format_nn_step(info: dict[str, Any], label: str = "nn") -> str:
     if isinstance(controller_info, dict):
         restart_prob = controller_info.get("restart_prob")
     restart_prob_str = "None" if restart_prob is None else f"{float(restart_prob):.4f}"
+    raw_sigma_error = float(info.get("raw_sigma_error", info.get("sigma_error", 0.0)))
     return (
         f"[{label}] "
         f"step={int(info.get('step', 0)):05d} "
@@ -207,6 +215,7 @@ def format_nn_step(info: dict[str, Any], label: str = "nn") -> str:
         f"|z-z0|={float(info.get('distance_to_start', 0.0)):.6f} "
         f"path={float(info.get('path_length', 0.0)):.6f} "
         f"wind={float(info.get('winding_angle', 0.0)):.4f} "
+        f"raw_sigma_err={raw_sigma_error:.6e} "
         f"sigma_err={float(info.get('sigma_error', 0.0)):.6e} "
         f"z={format_complex(complex(info.get('z_next', 0.0)))}"
     )

@@ -233,6 +233,9 @@ def main():
                 closure_tol=config["tracker"]["closure_tol"],
                 min_steps_between_restarts=5,
                 integration_method="tangent",
+                projection_defer_factor=4.0,
+                projection_defer_distance_ratio=0.08,
+                max_deferred_projection_steps=6,
             )
 
             best_local = None

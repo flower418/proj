@@ -310,6 +310,9 @@ def main():
             closure_tol=config["tracker"]["closure_tol"],
             min_step_size=config["ode"]["min_step_size"],
             integration_method="tangent",
+            projection_defer_factor=4.0,
+            projection_defer_distance_ratio=0.08,
+            max_deferred_projection_steps=6,
         )
         run_logger.log("running NN + ODE tracker")
         nn_t0 = time.perf_counter()
