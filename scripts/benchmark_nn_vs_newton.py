@@ -22,7 +22,7 @@ from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.config import load_yaml_config
 from src.utils.contour_compare import contour_distance_metrics
 from src.utils.demo_sampling import build_random_matrix, sample_random_contour_start
-from src.utils.run_logging import RunLogger
+from src.utils.run_logging import RunLogger, format_nn_step
 
 
 def parse_args():
@@ -76,6 +76,20 @@ def summarize_tracker_result(result: dict) -> dict:
     }
 
 
+def make_nn_console_callback(print_every: int = 20):
+    print_every = max(int(print_every), 1)
+
+    def _callback(info: dict) -> None:
+        step = int(info.get("step", 0)) + 1
+        if step % print_every != 0:
+            return
+        payload = dict(info)
+        payload["step"] = step
+        print(format_nn_step(payload, label="nn"), flush=True)
+
+    return _callback
+
+
 def run_nn_benchmark(
     *,
     A: np.ndarray,
@@ -114,8 +128,9 @@ def run_nn_benchmark(
         projection_defer_distance_ratio=0.08,
         max_deferred_projection_steps=6,
     )
+    step_callback = make_nn_console_callback(print_every=20)
     t0 = time.perf_counter()
-    result = tracker.track(z0=z0, max_steps=max_steps)
+    result = tracker.track(z0=z0, max_steps=max_steps, step_callback=step_callback)
     elapsed = float(time.perf_counter() - t0)
     summary = summarize_tracker_result(result)
     summary.update(
