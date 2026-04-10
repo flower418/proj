@@ -144,21 +144,29 @@ class TrainingLogger:
 
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
-        axes[0, 0].plot(epochs, self.history["train_loss"], label="train", linewidth=2)
-        axes[0, 0].plot(epochs, self.history["val_loss"], label="val", linewidth=2)
-        axes[0, 0].set_title("Total Loss")
+        self._plot_log_loss(
+            axes[0, 0],
+            epochs,
+            {
+                "train": self.history["train_loss"],
+                "val": self.history["val_loss"],
+            },
+            title="Total Loss (log scale)",
+        )
         axes[0, 0].set_xlabel("Epoch")
-        axes[0, 0].grid(True, alpha=0.3)
-        axes[0, 0].legend()
 
-        axes[0, 1].plot(epochs, self.history["train_step_loss"], label="train_step", linewidth=2)
-        axes[0, 1].plot(epochs, self.history["val_step_loss"], label="val_step", linewidth=2)
-        axes[0, 1].plot(epochs, self.history["train_restart_loss"], label="train_restart", linewidth=2)
-        axes[0, 1].plot(epochs, self.history["val_restart_loss"], label="val_restart", linewidth=2)
-        axes[0, 1].set_title("Component Losses")
+        self._plot_log_loss(
+            axes[0, 1],
+            epochs,
+            {
+                "train_step": self.history["train_step_loss"],
+                "val_step": self.history["val_step_loss"],
+                "train_restart": self.history["train_restart_loss"],
+                "val_restart": self.history["val_restart_loss"],
+            },
+            title="Component Losses (log scale)",
+        )
         axes[0, 1].set_xlabel("Epoch")
-        axes[0, 1].grid(True, alpha=0.3)
-        axes[0, 1].legend()
 
         axes[0, 2].plot(epochs, self.history["val_accuracy"], label="accuracy", linewidth=2)
         axes[0, 2].plot(epochs, self.history["val_f1"], label="f1", linewidth=2)
@@ -216,3 +224,19 @@ class TrainingLogger:
         fig.tight_layout()
         fig.savefig(self.summary_path, dpi=160, bbox_inches="tight")
         plt.close(fig)
+
+    def _plot_log_loss(
+        self,
+        ax,
+        epochs: np.ndarray,
+        series: Dict[str, list[float]],
+        title: str,
+    ) -> None:
+        floor = 1e-12
+        for label, values in series.items():
+            arr = np.maximum(np.asarray(values, dtype=np.float64), floor)
+            ax.semilogy(epochs, arr, label=label, linewidth=2)
+        ax.set_title(title)
+        ax.set_ylabel("Loss")
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend()

@@ -2,70 +2,124 @@ from __future__ import annotations
 
 import numpy as np
 
+from .contour_init import sigma_min_at
 
-def generate_random_matrix(
-    n: int,
-    matrix_type: str,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    if matrix_type == "complex":
+
+SUPPORTED_MATRIX_TYPES = (
+    "random_complex",
+    "random_hermitian",
+    "random_real",
+    "ill_conditioned",
+    "random_normal",
+    "banded_nonnormal",
+    "low_rank_plus_noise",
+    "jordan_perturbed",
+    "block_structured",
+)
+
+
+class MatrixGenerator:
+    @staticmethod
+    def random_complex(n: int, rng: np.random.Generator) -> np.ndarray:
         return rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
-    if matrix_type == "real":
-        return rng.standard_normal((n, n))
-    if matrix_type == "hermitian":
+
+    @staticmethod
+    def random_hermitian(n: int, rng: np.random.Generator) -> np.ndarray:
         base = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
         return (base + base.conj().T) / 2.0
-    raise ValueError(f"Unsupported matrix type: {matrix_type}")
+
+    @staticmethod
+    def random_real(n: int, rng: np.random.Generator) -> np.ndarray:
+        return rng.standard_normal((n, n))
+
+    @staticmethod
+    def ill_conditioned(
+        n: int,
+        rng: np.random.Generator,
+        condition_number: float = 1e6,
+    ) -> np.ndarray:
+        u, _ = np.linalg.qr(rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)))
+        v, _ = np.linalg.qr(rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)))
+        sigma = np.geomspace(1.0, 1.0 / condition_number, n)
+        return u @ np.diag(sigma) @ v.conj().T
+
+    @staticmethod
+    def random_normal(n: int, rng: np.random.Generator) -> np.ndarray:
+        q, _ = np.linalg.qr(rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)))
+        eigvals = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        return q @ np.diag(eigvals) @ q.conj().T
+
+    @staticmethod
+    def banded_nonnormal(n: int, rng: np.random.Generator) -> np.ndarray:
+        diag = 0.2 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+        upper = 0.9 * (rng.standard_normal(n - 1) + 1j * rng.standard_normal(n - 1)) if n > 1 else np.array([], dtype=np.complex128)
+        lower = 0.15 * (rng.standard_normal(n - 1) + 1j * rng.standard_normal(n - 1)) if n > 1 else np.array([], dtype=np.complex128)
+        matrix = np.diag(diag.astype(np.complex128))
+        if n > 1:
+            matrix += np.diag(upper.astype(np.complex128), 1)
+            matrix += np.diag(lower.astype(np.complex128), -1)
+        if n > 2:
+            second_upper = 0.08 * (rng.standard_normal(n - 2) + 1j * rng.standard_normal(n - 2))
+            matrix += np.diag(second_upper.astype(np.complex128), 2)
+        return matrix
+
+    @staticmethod
+    def low_rank_plus_noise(n: int, rng: np.random.Generator) -> np.ndarray:
+        rank = max(2, min(n // 6, 8))
+        u = rng.standard_normal((n, rank)) + 1j * rng.standard_normal((n, rank))
+        v = rng.standard_normal((n, rank)) + 1j * rng.standard_normal((n, rank))
+        low_rank = (u @ v.conj().T) / max(np.sqrt(rank), 1.0)
+        noise = 0.05 * (rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)))
+        return low_rank + noise
+
+    @staticmethod
+    def jordan_perturbed(n: int, rng: np.random.Generator) -> np.ndarray:
+        lam = complex(rng.standard_normal(), rng.standard_normal())
+        matrix = lam * np.eye(n, dtype=np.complex128)
+        if n > 1:
+            matrix += np.diag(np.ones(n - 1, dtype=np.complex128), 1)
+        matrix += 0.01 * (rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)))
+        return matrix
+
+    @staticmethod
+    def block_structured(n: int, rng: np.random.Generator) -> np.ndarray:
+        split = max(1, n // 2)
+        matrix = np.zeros((n, n), dtype=np.complex128)
+        matrix[:split, :split] = MatrixGenerator.random_complex(split, rng)
+        if n - split > 0:
+            block = MatrixGenerator.random_hermitian(n - split, rng)
+            matrix[split:, split:] = block + (1.5 + 0.8j) * np.eye(n - split, dtype=np.complex128)
+            matrix[:split, split:] = 0.08 * (rng.standard_normal((split, n - split)) + 1j * rng.standard_normal((split, n - split)))
+            matrix[split:, :split] = 0.03 * (rng.standard_normal((n - split, split)) + 1j * rng.standard_normal((n - split, split)))
+        return matrix
 
 
-def choose_point_around_random_eigenvalue(
+def sample_random_matrix_type(rng: np.random.Generator) -> str:
+    return str(SUPPORTED_MATRIX_TYPES[int(rng.integers(len(SUPPORTED_MATRIX_TYPES)))])
+
+
+def build_random_matrix(n: int, rng: np.random.Generator) -> tuple[str, np.ndarray]:
+    matrix_type = sample_random_matrix_type(rng)
+    matrix = getattr(MatrixGenerator, matrix_type)(n, rng)
+    return matrix_type, np.asarray(matrix, dtype=np.complex128)
+
+
+def sample_unrestricted_random_point(
     A: np.ndarray,
     rng: np.random.Generator,
-    radius_range: tuple[float, float],
 ) -> tuple[complex, complex]:
     eigvals = np.linalg.eigvals(np.asarray(A, dtype=np.complex128))
-    anchor = complex(eigvals[int(rng.integers(len(eigvals)))])
+    center = complex(np.mean(eigvals))
     spectral_scale = max(np.ptp(np.real(eigvals)), np.ptp(np.imag(eigvals)), 1.0)
-    r_min, r_max = radius_range
-    if not (0.0 < r_min < r_max):
-        raise ValueError("radius_range must satisfy 0 < R_MIN < R_MAX.")
-    radius = rng.uniform(r_min, r_max) * spectral_scale
-    angle = rng.uniform(0.0, 2.0 * np.pi)
-    z0 = anchor + radius * np.exp(1j * angle)
-    return z0, anchor
+    z_random = center + spectral_scale * (rng.standard_normal() + 1j * rng.standard_normal())
+    anchor = complex(eigvals[int(np.argmin(np.abs(eigvals - z_random)))])
+    return complex(z_random), anchor
 
 
-def choose_point_in_spectral_box(
+def sample_random_contour_start(
     A: np.ndarray,
     rng: np.random.Generator,
-    padding: float,
-) -> tuple[complex, complex]:
-    eigvals = np.linalg.eigvals(np.asarray(A, dtype=np.complex128))
-    x_min = float(np.min(np.real(eigvals)))
-    x_max = float(np.max(np.real(eigvals)))
-    y_min = float(np.min(np.imag(eigvals)))
-    y_max = float(np.max(np.imag(eigvals)))
-    x_span = max(x_max - x_min, 1.0)
-    y_span = max(y_max - y_min, 1.0)
-    x_pad = max(float(padding), 0.0) * x_span
-    y_pad = max(float(padding), 0.0) * y_span
-    z_random = complex(
-        rng.uniform(x_min - x_pad, x_max + x_pad),
-        rng.uniform(y_min - y_pad, y_max + y_pad),
-    )
-    nearest = complex(eigvals[int(np.argmin(np.abs(eigvals - z_random)))])
-    return z_random, nearest
-
-
-def sample_random_point(
-    A: np.ndarray,
-    rng: np.random.Generator,
-    point_sampler: str,
-    radius_range: tuple[float, float],
-    box_padding: float,
-) -> tuple[complex, complex]:
-    if point_sampler == "spectral_box":
-        return choose_point_in_spectral_box(A, rng, padding=box_padding)
-    if point_sampler == "around_eigenvalue":
-        return choose_point_around_random_eigenvalue(A, rng, radius_range=radius_range)
-    raise ValueError(f"Unsupported point_sampler: {point_sampler}")
+) -> tuple[complex, float, complex, complex]:
+    z_random, anchor = sample_unrestricted_random_point(A=A, rng=rng)
+    epsilon = float(sigma_min_at(A, z_random))
+    return complex(z_random), epsilon, complex(z_random), complex(anchor)
