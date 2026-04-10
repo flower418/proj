@@ -46,7 +46,7 @@ def save_plot(
     imag_margin = max(np.ptp(np.imag(traj)) * 0.12, 1.0)
     ax.set_xlim(np.real(traj).min() - real_margin, np.real(traj).max() + real_margin)
     ax.set_ylim(np.imag(traj).min() - imag_margin, np.imag(traj).max() + imag_margin)
-    plot_pseudospectrum_background(A, epsilon, ax, resolution=120, alpha=0.16)
+    plot_pseudospectrum_background(A, epsilon, ax, alpha=0.16)
     ax.plot(np.real(traj), np.imag(traj), color="tab:orange", linewidth=2.0, label="Newton PC", zorder=4)
     ax.scatter(np.real(z_random), np.imag(z_random), c="green", s=110, marker="o", edgecolors="black", linewidths=0.6, label="Random Point", zorder=6)
     ax.scatter(np.real(traj[0]), np.imag(traj[0]), c="blue", s=70, marker="o", label="Start", zorder=6)

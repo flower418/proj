@@ -14,11 +14,11 @@ def plot_pseudospectrum_background(
     A: np.ndarray,
     epsilon: float,
     ax,
-    resolution: int = 100,
     alpha: float = 0.18,
     padding: float = 0.2,
 ):
     """Draw a background contour for sigma_min(zI - A) = epsilon."""
+    grid_size = 100
     xlim = ax.get_xlim()
     ylim = ax.get_ylim()
     if xlim == (0.0, 1.0) and ylim == (0.0, 1.0):
@@ -33,16 +33,16 @@ def plot_pseudospectrum_background(
         ylim = (y_min - y_pad, y_max + y_pad)
 
     xx, yy = np.meshgrid(
-        np.linspace(xlim[0], xlim[1], resolution),
-        np.linspace(ylim[0], ylim[1], resolution),
+        np.linspace(xlim[0], xlim[1], grid_size),
+        np.linspace(ylim[0], ylim[1], grid_size),
     )
     zz = xx + 1j * yy
     n = A.shape[0]
     sigma_min = np.zeros_like(xx, dtype=np.float64)
     identity = np.eye(n, dtype=np.complex128)
 
-    for i in range(resolution):
-        for j in range(resolution):
+    for i in range(grid_size):
+        for j in range(grid_size):
             sigma_min[i, j] = float(np.min(svdvals(zz[i, j] * identity - A)))
 
     return ax.contour(
@@ -76,7 +76,7 @@ def plot_trajectory(
         imag_margin = max(np.ptp(np.imag(traj_array)) * 0.2, 1.0)
         ax.set_xlim(np.real(traj_array).min() - real_margin, np.real(traj_array).max() + real_margin)
         ax.set_ylim(np.imag(traj_array).min() - imag_margin, np.imag(traj_array).max() + imag_margin)
-        plot_pseudospectrum_background(A, epsilon, ax, resolution=100)
+        plot_pseudospectrum_background(A, epsilon, ax)
 
     if step_sizes is not None and len(step_sizes) == len(traj_array) - 1 and len(traj_array) >= 2:
         xy = np.column_stack([np.real(traj_array), np.imag(traj_array)])

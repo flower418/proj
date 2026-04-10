@@ -19,11 +19,9 @@ from src.core.pseudoinverse import PseudoinverseSolver
 from src.nn.controller import NNController, build_controller_from_checkpoint
 from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.config import load_yaml_config
-from src.utils.contour_compare import contour_distance_metrics, resample_curve_by_arclength
-from src.utils.contour_init import sigma_min_at
+from src.utils.contour_compare import contour_distance_metrics
 from src.utils.demo_sampling import build_random_matrix, sample_random_contour_start
 from src.utils.run_logging import StepDiagnosticsCollector, RunLogger, format_newton_step, format_nn_step, make_step_callback
-from src.utils.visualization import plot_pseudospectrum_background
 
 
 def parse_args():
@@ -80,21 +78,6 @@ def summarize_tracker_result(result: dict) -> dict:
     }
 
 
-def compute_sigma_error_stats(
-    A: np.ndarray,
-    epsilon: float,
-    trajectory: np.ndarray,
-    num_samples: int = 256,
-) -> dict[str, float]:
-    sampled = resample_curve_by_arclength(trajectory, num_points=min(num_samples, max(len(trajectory), 1)))
-    sigma_errors = [abs(sigma_min_at(A, complex(z)) - epsilon) for z in sampled]
-    sigma_errors = np.asarray(sigma_errors, dtype=np.float64)
-    return {
-        "mean_sigma_error": float(np.mean(sigma_errors)) if sigma_errors.size > 0 else 0.0,
-        "max_sigma_error": float(np.max(sigma_errors)) if sigma_errors.size > 0 else 0.0,
-    }
-
-
 def sample_marker_points(trajectory: np.ndarray, count: int, phase: float = 0.0) -> np.ndarray:
     traj = np.asarray(trajectory, dtype=np.complex128)
     if len(traj) == 0:
@@ -127,7 +110,6 @@ def save_comparison_plot(
     imag_margin = max(np.ptp(np.imag(merged)) * 0.12, 1.0)
     ax.set_xlim(np.real(merged).min() - real_margin, np.real(merged).max() + real_margin)
     ax.set_ylim(np.imag(merged).min() - imag_margin, np.imag(merged).max() + imag_margin)
-    plot_pseudospectrum_background(A, epsilon, ax, resolution=120, alpha=0.12)
 
     nn_traj = np.asarray(nn_result["trajectory"], dtype=np.complex128)
     base_traj = np.asarray(baseline_result["trajectory"], dtype=np.complex128)
@@ -339,7 +321,6 @@ def main():
         baseline_diag_path = run_logger.write_json("baseline_diagnostics_summary.json", baseline_diagnostics)
 
         nn_summary = summarize_tracker_result(nn_result)
-        nn_summary.update(compute_sigma_error_stats(A, epsilon, nn_result["trajectory"]))
         nn_summary.update(
             {
                 "elapsed_seconds": nn_elapsed,
@@ -350,7 +331,6 @@ def main():
         )
 
         baseline_summary = summarize_tracker_result(baseline_result)
-        baseline_summary.update(compute_sigma_error_stats(A, epsilon, baseline_result["trajectory"]))
         baseline_summary.update(
             {
                 "elapsed_seconds": baseline_elapsed,
@@ -410,7 +390,6 @@ def main():
             "epsilon": float(epsilon),
             "epsilon_compute_seconds": epsilon_compute_seconds,
             "random_point": [float(np.real(z_random)), float(np.imag(z_random))],
-            "sigma_at_random_point": float(sigma_min_at(A, z_random)),
             "start_point": [float(np.real(z0)), float(np.imag(z0))],
             "nearest_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
             "nn_plus_ode": nn_summary,
