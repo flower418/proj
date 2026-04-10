@@ -35,6 +35,9 @@ python -u scripts/generate_large_dataset.py \
 - `--seed`
 - `--log-dir`
 
+训练时直接使用 `configs/default.yaml` 里的 `training` 段。
+不再有单独的 `configs/training.yaml`。
+
 ## 2. 矩阵类型
 
 脚本内部会随机抽取以下矩阵类型：

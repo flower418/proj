@@ -6,9 +6,8 @@
 2. 生成大规模离线数据
 3. 检查数据
 4. 训练模型
-5. 跑 NN 推理
-6. 跑 Newton baseline
-7. 跑 NN vs Newton 对比
+5. 跑 NN vs Newton 对比
+6. 对自己的矩阵做推理
 
 ## 1. 建环境
 
@@ -107,6 +106,9 @@ python src/data/dataset.py --data-dir data/prod1m
 
 ## 4. 训练模型
 
+当前训练只使用 `configs/default.yaml`。
+不再有单独的 `configs/training.yaml`。
+
 ```bash
 python scripts/train_from_dataset.py \
     --data-dir data/prod1m \
@@ -133,39 +135,7 @@ python scripts/train_from_dataset.py \
 - `models/prod1m_model/test_metrics.json`
 - `logs/prod1m_model/training_summary.png`
 
-## 5. 跑 NN 推理
-
-```bash
-python scripts/demo_random_inference.py \
-    --checkpoint models/prod1m_model/best_model.pt \
-    --matrix-size 50 \
-    --seed 0 \
-    --output-dir results/nn_demo_seed0
-```
-
-输出文件：
-
-- `results/nn_demo_seed0/random_matrix.npy`
-- `results/nn_demo_seed0/tracked_contour.png`
-- `results/nn_demo_seed0/tracking_summary.json`
-
-## 6. 跑 Newton Baseline
-
-```bash
-python scripts/run_newton_baseline.py \
-    --matrix-size 50 \
-    --seed 0 \
-    --output-dir results/newton_seed0
-```
-
-输出文件：
-
-- `results/newton_seed0/random_matrix.npy`
-- `results/newton_seed0/newton_baseline.png`
-- `results/newton_seed0/trajectory.npz`
-- `results/newton_seed0/summary.json`
-
-## 7. 跑 NN vs Newton 对比
+## 5. 跑 NN vs Newton 对比
 
 ```bash
 python scripts/benchmark_nn_vs_newton.py \
@@ -187,3 +157,16 @@ python scripts/benchmark_nn_vs_newton.py \
 - `results/bench_seed0/logs/.../nn/summary.json`
 
 benchmark 不再额外写 baseline summary 或 step 日志，只保留 NN 的 summary。
+
+## 6. 对自己的矩阵做推理
+
+```bash
+python scripts/run_tracking.py \
+    --matrix-path path/to/matrix.npy \
+    --checkpoint models/prod1m_model/best_model.pt \
+    --epsilon 0.1 \
+    --plot-out results/my_matrix/tracked_contour.png \
+    --result-out results/my_matrix/tracking_summary.json
+```
+
+如果你不提供 `--checkpoint`，它会退化成固定步长 ODE 跟踪。

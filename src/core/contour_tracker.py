@@ -183,12 +183,10 @@ class ContourTracker:
     def _project_to_contour_locally(
         self,
         z_candidate: complex,
-        search_radius: float,
         sigma_candidate: float | None = None,
         u_candidate: np.ndarray | None = None,
         v_candidate: np.ndarray | None = None,
     ) -> tuple[complex, np.ndarray, np.ndarray, dict] | None:
-        del search_radius
         return project_to_contour_by_local_normal(
             A=self.A,
             epsilon=self.epsilon,
@@ -333,7 +331,6 @@ class ContourTracker:
                 if sigma_error_approx <= approx_projection_window and residual_approx <= 3.0 * residual_limit:
                     local_projection = self._project_to_contour_locally(
                         z_candidate,
-                        search_radius=ds_try,
                         sigma_candidate=float(sigma_approx),
                         u_candidate=u_candidate,
                         v_candidate=v_candidate,
@@ -406,7 +403,6 @@ class ContourTracker:
 
             local_projection = self._project_to_contour_locally(
                 z_candidate,
-                search_radius=ds_try,
                 sigma_candidate=float(sigma_candidate),
                 u_candidate=u_exact,
                 v_candidate=v_exact,

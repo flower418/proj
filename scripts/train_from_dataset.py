@@ -20,7 +20,6 @@ def parse_args():
     parser = argparse.ArgumentParser(description="从预生成数据集训练")
     parser.add_argument("--data-dir", type=str, required=True, help="数据集目录")
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--training-config", default="configs/training.yaml")
     parser.add_argument("--experiment-name", type=str, default="model")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -49,7 +48,6 @@ def parse_args():
 def main():
     args = parse_args()
     config = load_yaml_config(args.config)
-    train_cfg = load_yaml_config(args.training_config, validate=False).get("defaults", {})
     controller_cfg = dict(config["controller"])
     if args.hidden_dims is not None:
         controller_cfg["hidden_dims"] = args.hidden_dims
@@ -77,10 +75,10 @@ def main():
         training_cfg["focal_gamma"] = args.focal_gamma
     if args.gradient_clip_norm is not None:
         training_cfg["gradient_clip_norm"] = args.gradient_clip_norm
-    batch_size = args.batch_size if args.batch_size is not None else train_cfg.get("batch_size", config["training"]["batch_size"])
-    learning_rate = args.learning_rate if args.learning_rate is not None else train_cfg.get("learning_rate", training_cfg["learning_rate"])
-    weight_decay = args.weight_decay if args.weight_decay is not None else train_cfg.get("weight_decay", training_cfg.get("weight_decay", 0.0))
-    early_stop_patience = args.early_stop_patience if args.early_stop_patience is not None else train_cfg.get("early_stop_patience", training_cfg.get("early_stop_patience", 10))
+    batch_size = args.batch_size if args.batch_size is not None else training_cfg["batch_size"]
+    learning_rate = args.learning_rate if args.learning_rate is not None else training_cfg["learning_rate"]
+    weight_decay = args.weight_decay if args.weight_decay is not None else training_cfg.get("weight_decay", 0.0)
+    early_stop_patience = args.early_stop_patience if args.early_stop_patience is not None else training_cfg.get("early_stop_patience", 10)
     gradient_clip_norm = training_cfg.get("gradient_clip_norm")
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
@@ -121,15 +119,14 @@ def main():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
-        factor=train_cfg.get("scheduler_factor", config["training"]["scheduler_factor"]),
-        patience=train_cfg.get("scheduler_patience", config["training"]["scheduler_patience"]),
+        factor=training_cfg["scheduler_factor"],
+        patience=training_cfg["scheduler_patience"],
     )
 
     # 日志
     logger = TrainingLogger(log_dir=args.log_dir, experiment_name=args.experiment_name)
     logger.save_config({
         "config": config,
-        "training_config": train_cfg,
         "effective_controller_config": controller_cfg,
         "effective_training_config": {
             **training_cfg,
@@ -156,7 +153,7 @@ def main():
     )
 
     # 训练
-    epochs = args.epochs if args.epochs is not None else train_cfg.get("epochs", config["training"]["epochs"])
+    epochs = args.epochs if args.epochs is not None else training_cfg["epochs"]
     experiment_dir = Path(args.checkpoint_dir) / args.experiment_name
     history = trainer.train(
         train_loader=train_loader,
