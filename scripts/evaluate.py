@@ -9,7 +9,7 @@ import torch
 
 import _bootstrap  # noqa: F401
 
-from src.core.contour_tracker import ContourTracker
+from src.core.contour_tracker import FAST_TANGENT_TRACKER_KWARGS, ContourTracker
 from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.data.dataset import PseudospectrumDataset
@@ -120,6 +120,7 @@ def main():
             controller=controller,
             fixed_step_size=config["ode"]["initial_step_size"],
             closure_tol=config["tracker"]["closure_tol"],
+            **FAST_TANGENT_TRACKER_KWARGS,
         )
         tracking_result = tracker.track(z0=z0, max_steps=args.max_steps)
         metrics["closure_error"] = contour_closure_error(tracking_result["trajectory"])

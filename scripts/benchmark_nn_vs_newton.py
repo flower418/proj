@@ -14,7 +14,7 @@ import torch
 import _bootstrap  # noqa: F401
 
 from src.baselines import NewtonPredictorCorrectorTracker
-from src.core.contour_tracker import ContourTracker
+from src.core.contour_tracker import FAST_TANGENT_TRACKER_KWARGS, ContourTracker
 from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.nn.controller import NNController, build_controller_from_checkpoint
@@ -123,10 +123,7 @@ def run_nn_benchmark(
         fixed_step_size=config["ode"]["initial_step_size"],
         closure_tol=config["tracker"]["closure_tol"],
         min_step_size=config["ode"]["min_step_size"],
-        integration_method="tangent",
-        projection_defer_factor=4.0,
-        projection_defer_distance_ratio=0.08,
-        max_deferred_projection_steps=6,
+        **FAST_TANGENT_TRACKER_KWARGS,
     )
     step_callback = make_nn_console_callback(print_every=20)
     t0 = time.perf_counter()

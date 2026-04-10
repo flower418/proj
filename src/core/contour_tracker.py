@@ -11,6 +11,17 @@ from src.utils.local_projection import project_to_contour_by_local_normal
 from src.utils.svd import smallest_singular_triplet
 
 
+FAST_TANGENT_TRACKER_KWARGS = {
+    "integration_method": "tangent",
+    "projection_defer_factor": 4.0,
+    "projection_defer_distance_ratio": 0.08,
+    "max_deferred_projection_steps": 6,
+    "exact_triplet_refresh_interval": 4,
+    "approx_triplet_sigma_tol": 1.0e-3,
+    "approx_triplet_residual_tol": 1.0e-2,
+}
+
+
 @dataclass
 class TrackerState:
     z: complex
