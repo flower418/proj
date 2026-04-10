@@ -132,12 +132,17 @@ python scripts/benchmark_nn_vs_newton.py \
     --output-dir results/bench_demo
 ```
 
+这个 benchmark 现在会默认并行跑 `NN + ODE` 和 `Newton PC`，总等待时间接近两者里更慢的那个，而不是两段时间直接相加。
+
 Benchmark 输出包括：
 
 - `results/bench_demo/comparison_plot.png`
 - `results/bench_demo/comparison_summary.json`
 - `results/bench_demo/trajectories.npz`
 - `results/bench_demo/random_matrix.npy`
+- `results/bench_demo/logs/.../nn/summary.json`
+
+其中 benchmark 只额外保留 NN 的 summary 文件，不再额外写 baseline summary 或 step 日志。
 
 ### 8. 对自己的矩阵做追踪
 

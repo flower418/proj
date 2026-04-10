@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import time
 from pathlib import Path
@@ -21,7 +22,7 @@ from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.config import load_yaml_config
 from src.utils.contour_compare import contour_distance_metrics
 from src.utils.demo_sampling import build_random_matrix, sample_random_contour_start
-from src.utils.run_logging import StepDiagnosticsCollector, RunLogger, format_newton_step, format_nn_step, make_step_callback
+from src.utils.run_logging import RunLogger
 
 
 def parse_args():
@@ -43,9 +44,6 @@ def parse_args():
     parser.add_argument("--baseline-max-corrector-iters", type=int, default=8)
     parser.add_argument("--baseline-max-step-halvings", type=int, default=8)
     parser.add_argument("--log-dir", default=None, help="Directory for runtime logs. Defaults to <output-dir>/logs.")
-    parser.add_argument("--nn-log-every", type=int, default=50, help="Print one NN step log every k steps. All steps are still saved to JSONL.")
-    parser.add_argument("--baseline-log-every", type=int, default=50, help="Print one Newton step log every k steps. All steps are still saved to JSONL.")
-    parser.add_argument("--quiet", action="store_true", help="Disable step-by-step console diagnostics while still saving logs to files.")
     return parser.parse_args()
 
 
@@ -75,6 +73,113 @@ def summarize_tracker_result(result: dict) -> dict:
         "mean_step_size": float(np.mean(step_sizes)) if step_sizes.size > 0 else 0.0,
         "min_step_size": float(np.min(step_sizes)) if step_sizes.size > 0 else 0.0,
         "max_step_size": float(np.max(step_sizes)) if step_sizes.size > 0 else 0.0,
+    }
+
+
+def run_nn_benchmark(
+    *,
+    A: np.ndarray,
+    epsilon: float,
+    z0: complex,
+    checkpoint: str,
+    config: dict,
+    max_steps: int,
+    nn_min_step_size: float | None,
+    restart_threshold: float,
+    summary_path: Path,
+) -> dict:
+    solver = PseudoinverseSolver(
+        method=config["solver"]["method"],
+        tol=config["solver"]["tol"],
+        max_iter=config["solver"]["max_iter"],
+    )
+    controller = load_controller(checkpoint, config)
+    nn_controller = AdaptiveInferenceController(
+        controller,
+        min_step_size=float(nn_min_step_size if nn_min_step_size is not None else config["controller"]["step_size_min"]),
+        max_step_size=config["controller"].get("step_size_max"),
+        restart_threshold=float(restart_threshold),
+    )
+
+    tracker = ContourTracker(
+        A=A,
+        epsilon=epsilon,
+        ode_system=ManifoldODE(A, epsilon=epsilon, solver=solver),
+        controller=nn_controller,
+        fixed_step_size=config["ode"]["initial_step_size"],
+        closure_tol=config["tracker"]["closure_tol"],
+        min_step_size=config["ode"]["min_step_size"],
+        integration_method="tangent",
+        projection_defer_factor=4.0,
+        projection_defer_distance_ratio=0.08,
+        max_deferred_projection_steps=6,
+    )
+    t0 = time.perf_counter()
+    result = tracker.track(z0=z0, max_steps=max_steps)
+    elapsed = float(time.perf_counter() - t0)
+    summary = summarize_tracker_result(result)
+    summary.update(
+        {
+            "elapsed_seconds": elapsed,
+            "total_time_seconds": elapsed,
+            "num_restarts": int(len(result.get("restart_indices", []))),
+            "num_projections": int(len(result.get("projection_indices", []))),
+        }
+    )
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    with summary_path.open("w", encoding="utf-8") as fh:
+        json.dump(summary, fh, indent=2)
+    return {
+        "result": result,
+        "elapsed_seconds": elapsed,
+        "summary": summary,
+        "summary_path": str(summary_path),
+    }
+
+
+def run_newton_benchmark(
+    *,
+    A: np.ndarray,
+    epsilon: float,
+    z0: complex,
+    closure_tol: float,
+    max_steps: int,
+    initial_step_size: float,
+    min_step_size: float,
+    max_step_size: float,
+    corrector_tol: float,
+    max_corrector_iters: int,
+    max_step_halvings: int,
+) -> dict:
+    tracker = NewtonPredictorCorrectorTracker(
+        A=A,
+        epsilon=epsilon,
+        initial_step_size=initial_step_size,
+        min_step_size=min_step_size,
+        max_step_size=max_step_size,
+        corrector_tol=corrector_tol,
+        max_corrector_iters=max_corrector_iters,
+        max_step_halvings=max_step_halvings,
+        closure_tol=closure_tol,
+    )
+    t0 = time.perf_counter()
+    result = tracker.track(z0=z0, max_steps=max_steps)
+    elapsed = float(time.perf_counter() - t0)
+    summary = summarize_tracker_result(result)
+    summary.update(
+        {
+            "elapsed_seconds": elapsed,
+            "total_time_seconds": elapsed,
+            "mean_corrector_iterations": float(result.get("mean_corrector_iterations", 0.0)),
+            "mean_predictor_halvings": float(result.get("mean_predictor_halvings", 0.0)),
+            "mean_line_search_backtracks": float(result.get("mean_line_search_backtracks", 0.0)),
+            "failure_reason": result.get("failure_reason"),
+        }
+    )
+    return {
+        "result": result,
+        "elapsed_seconds": elapsed,
+        "summary": summary,
     }
 
 
@@ -242,105 +347,49 @@ def main():
             f"prepared instance n={args.matrix_size} type={matrix_type} "
             f"epsilon={epsilon:.6f} z_random={z_random} z0={z0}"
         )
-
-        solver = PseudoinverseSolver(
-            method=config["solver"]["method"],
-            tol=config["solver"]["tol"],
-            max_iter=config["solver"]["max_iter"],
-        )
-        controller = load_controller(args.checkpoint, config)
-        nn_controller = AdaptiveInferenceController(
-            controller,
-            min_step_size=float(args.nn_min_step_size if args.nn_min_step_size is not None else config["controller"]["step_size_min"]),
-            max_step_size=config["controller"].get("step_size_max"),
-            restart_threshold=float(args.restart_threshold),
-        )
-
-        nn_collector = StepDiagnosticsCollector(label="nn_plus_ode")
-        nn_step_callback = make_step_callback(
-            run_logger=run_logger,
-            collector=nn_collector,
-            jsonl_filename="nn_steps.jsonl",
-            formatter=lambda info: format_nn_step(info, label="nn"),
-            print_every=0 if args.quiet else max(args.nn_log_every, 1),
-        )
-        nn_tracker = ContourTracker(
-            A=A,
-            epsilon=epsilon,
-            ode_system=ManifoldODE(A, epsilon=epsilon, solver=solver),
-            controller=nn_controller,
-            fixed_step_size=config["ode"]["initial_step_size"],
-            closure_tol=config["tracker"]["closure_tol"],
-            min_step_size=config["ode"]["min_step_size"],
-            integration_method="tangent",
-            projection_defer_factor=4.0,
-            projection_defer_distance_ratio=0.08,
-            max_deferred_projection_steps=6,
-        )
-        run_logger.log("running NN + ODE tracker")
-        nn_t0 = time.perf_counter()
-        nn_result = nn_tracker.track(z0=z0, max_steps=args.max_steps, step_callback=nn_step_callback)
-        nn_elapsed = float(time.perf_counter() - nn_t0)
+        run_logger.log("running NN + ODE and Newton baseline in parallel")
+        benchmark_t0 = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            nn_future = executor.submit(
+                run_nn_benchmark,
+                A=A,
+                epsilon=epsilon,
+                z0=z0,
+                checkpoint=args.checkpoint,
+                config=config,
+                max_steps=args.max_steps,
+                nn_min_step_size=args.nn_min_step_size,
+                restart_threshold=args.restart_threshold,
+                summary_path=run_logger.log_dir / "nn" / "summary.json",
+            )
+            baseline_future = executor.submit(
+                run_newton_benchmark,
+                A=A,
+                epsilon=epsilon,
+                z0=z0,
+                closure_tol=config["tracker"]["closure_tol"],
+                max_steps=args.max_steps,
+                initial_step_size=args.baseline_initial_step_size,
+                min_step_size=args.baseline_min_step_size,
+                max_step_size=args.baseline_max_step_size,
+                corrector_tol=args.baseline_corrector_tol,
+                max_corrector_iters=args.baseline_max_corrector_iters,
+                max_step_halvings=args.baseline_max_step_halvings,
+            )
+            nn_run = nn_future.result()
+            baseline_run = baseline_future.result()
+        benchmark_elapsed = float(time.perf_counter() - benchmark_t0)
         run_logger.log(
-            f"NN + ODE done elapsed={nn_elapsed:.3f}s closed={int(nn_result['closed'])} "
-            f"points={len(nn_result['trajectory'])} restarts={len(nn_result.get('restart_indices', []))} "
-            f"projections={len(nn_result.get('projection_indices', []))}"
+            f"parallel benchmark done wall_clock={benchmark_elapsed:.3f}s "
+            f"nn={nn_run['elapsed_seconds']:.3f}s newton={baseline_run['elapsed_seconds']:.3f}s"
         )
 
-        baseline_collector = StepDiagnosticsCollector(label="newton_predictor_corrector")
-        baseline_step_callback = make_step_callback(
-            run_logger=run_logger,
-            collector=baseline_collector,
-            jsonl_filename="baseline_steps.jsonl",
-            formatter=lambda info: format_newton_step(info, label="newton"),
-            print_every=0 if args.quiet else max(args.baseline_log_every, 1),
-        )
-        baseline_tracker = NewtonPredictorCorrectorTracker(
-            A=A,
-            epsilon=epsilon,
-            initial_step_size=args.baseline_initial_step_size,
-            min_step_size=args.baseline_min_step_size,
-            max_step_size=args.baseline_max_step_size,
-            corrector_tol=args.baseline_corrector_tol,
-            max_corrector_iters=args.baseline_max_corrector_iters,
-            max_step_halvings=args.baseline_max_step_halvings,
-            closure_tol=config["tracker"]["closure_tol"],
-        )
-        run_logger.log("running Newton predictor-corrector baseline")
-        baseline_t0 = time.perf_counter()
-        baseline_result = baseline_tracker.track(z0=z0, max_steps=args.max_steps, step_callback=baseline_step_callback)
-        baseline_elapsed = float(time.perf_counter() - baseline_t0)
-        run_logger.log(
-            f"Newton baseline done elapsed={baseline_elapsed:.3f}s closed={int(baseline_result['closed'])} "
-            f"points={len(baseline_result['trajectory'])} failure_reason={baseline_result.get('failure_reason')}"
-        )
-
-        nn_diagnostics = nn_collector.summary()
-        baseline_diagnostics = baseline_collector.summary()
-        nn_diag_path = run_logger.write_json("nn_diagnostics_summary.json", nn_diagnostics)
-        baseline_diag_path = run_logger.write_json("baseline_diagnostics_summary.json", baseline_diagnostics)
-
-        nn_summary = summarize_tracker_result(nn_result)
-        nn_summary.update(
-            {
-                "elapsed_seconds": nn_elapsed,
-                "num_restarts": int(len(nn_result.get("restart_indices", []))),
-                "num_projections": int(len(nn_result.get("projection_indices", []))),
-                "diagnostics": nn_diagnostics,
-            }
-        )
-
-        baseline_summary = summarize_tracker_result(baseline_result)
-        baseline_summary.update(
-            {
-                "elapsed_seconds": baseline_elapsed,
-                "mean_corrector_iterations": float(baseline_result.get("mean_corrector_iterations", 0.0)),
-                "mean_predictor_halvings": float(baseline_result.get("mean_predictor_halvings", 0.0)),
-                "mean_line_search_backtracks": float(baseline_result.get("mean_line_search_backtracks", 0.0)),
-                "failure_reason": baseline_result.get("failure_reason"),
-                "diagnostics": baseline_diagnostics,
-            }
-        )
+        nn_result = nn_run["result"]
+        baseline_result = baseline_run["result"]
+        nn_elapsed = float(nn_run["elapsed_seconds"])
+        baseline_elapsed = float(baseline_run["elapsed_seconds"])
+        nn_summary = dict(nn_run["summary"])
+        baseline_summary = dict(baseline_run["summary"])
 
         comparison = {
             "nn_vs_newton": contour_distance_metrics(nn_result["trajectory"], baseline_result["trajectory"]),
@@ -378,10 +427,10 @@ def main():
             "trajectories_path": str(traj_out),
             "log_dir": str(run_logger.log_dir),
             "run_log_path": str(run_logger.run_log_path),
-            "nn_step_log_path": str(run_logger.log_dir / "nn_steps.jsonl"),
-            "baseline_step_log_path": str(run_logger.log_dir / "baseline_steps.jsonl"),
-            "nn_diagnostics_path": str(nn_diag_path),
-            "baseline_diagnostics_path": str(baseline_diag_path),
+            "execution_mode": "parallel_threads",
+            "wall_clock_seconds": benchmark_elapsed,
+            "total_time_seconds": benchmark_elapsed,
+            "nn_summary_path": nn_run["summary_path"],
             "matrix_size": args.matrix_size,
             "matrix_type": matrix_type,
             "seed": args.seed,

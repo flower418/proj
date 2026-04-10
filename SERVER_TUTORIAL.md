@@ -176,9 +176,14 @@ python scripts/benchmark_nn_vs_newton.py \
     --output-dir results/bench_seed0
 ```
 
+这个 benchmark 默认会并行跑 `NN + ODE` 和 `Newton PC`，所以整体耗时通常接近较慢的那一路。
+
 输出文件：
 
 - `results/bench_seed0/comparison_plot.png`
 - `results/bench_seed0/comparison_summary.json`
 - `results/bench_seed0/trajectories.npz`
 - `results/bench_seed0/random_matrix.npy`
+- `results/bench_seed0/logs/.../nn/summary.json`
+
+benchmark 不再额外写 baseline summary 或 step 日志，只保留 NN 的 summary。

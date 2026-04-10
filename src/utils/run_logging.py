@@ -38,17 +38,19 @@ def to_jsonable(value: Any) -> Any:
 
 
 class RunLogger:
-    def __init__(self, log_dir: str | Path, run_name: str = "run", timestamped: bool = True):
+    def __init__(self, log_dir: str | Path, run_name: str = "run", timestamped: bool = True, echo: bool = True):
         base_dir = Path(log_dir)
         self.log_dir = base_dir / f"{run_name}_{_timestamp()}" if timestamped else base_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.run_log_path = self.log_dir / "run.log"
         self._run_handle = self.run_log_path.open("a", encoding="utf-8")
         self._jsonl_handles: dict[Path, Any] = {}
+        self.echo = bool(echo)
 
     def log(self, message: str) -> None:
         line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
-        print(line, flush=True)
+        if self.echo:
+            print(line, flush=True)
         self._run_handle.write(line + "\n")
         self._run_handle.flush()
 
