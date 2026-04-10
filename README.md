@@ -6,26 +6,34 @@
 - 从复平面上的随机点或指定点出发
 - 追踪经过该点的 `epsilon`-伪谱等高线
 
-当前主线只有四个入口：
+核心不是黑盒补轮廓，而是：
 
-- `scripts/generate_large_dataset.py`
-- `scripts/train_from_dataset.py`
-- `scripts/benchmark_nn_vs_newton.py`
-- `scripts/run_tracking.py`
+- 白盒 ODE 负责沿等高线推进
+- 神经网络只负责预测步长 `ds` 和是否做一次精确 SVD 重启
+
+## 推荐工作流
+
+当前建议的主流程只有这一条：
+
+1. 用 `scripts/generate_large_dataset.py` 生成离线数据集
+2. 用 `scripts/train_from_dataset.py` 训练控制器
+3. 用 `scripts/evaluate.py`、`scripts/demo_random_inference.py`、`scripts/run_newton_baseline.py`、`scripts/benchmark_nn_vs_newton.py` 做评估和对比
+
+`scripts/generate_data.py` 和 `scripts/train_controller.py` 只适合小规模 smoke test。
 
 ## 快速开始
 
 ### 1. 安装环境
 
 ```bash
-conda create -n pseudospectrum python=3.10 -y
-conda activate pseudospectrum
+conda create -n proj python=3.12 -y
+conda activate proj
 pip install -r requirements.txt
 ```
 
 ### 2. 生成训练数据
 
-当前生成策略固定为：
+当前 `generate_large_dataset.py` 的策略固定为：
 
 - 矩阵类型从内置支持集合中随机抽取
 - 从谱中心附近的复高斯分布随机取点
@@ -64,23 +72,28 @@ python -u scripts/generate_large_dataset.py \
 - `data/my_data/dataset_stats.json`
 - `data/my_data/logs/...`
 
+说明：
+
+- `target_samples` 是下限，不是严格上限；脚本按整条轨迹追加样本，最终样本数可能略高于目标值
+- train / val / test 划分优先按 `trajectory_id` 分组，避免同一轨迹同时进入不同 split
+
 ### 3. 检查数据
 
 ```bash
 python src/data/dataset.py --data-dir data/my_data
 ```
 
-### 4. 训练控制器
+当前数据集的控制器输入维度是 `14`。
 
-当前训练只读一个配置文件：`configs/default.yaml`。
-不再有单独的 `training.yaml`。
+### 4. 训练控制器
 
 ```bash
 python scripts/train_from_dataset.py \
     --data-dir data/my_data \
     --experiment-name my_model \
     --epochs 50 \
-    --batch-size 256
+    --batch-size 256 \
+    --device cuda
 ```
 
 训练输出：
@@ -90,28 +103,15 @@ python scripts/train_from_dataset.py \
 - `models/my_model/test_metrics.json`
 - `logs/my_model/training_summary.png`
 
-### 5. 跑 NN vs Newton benchmark
+### 5. 从随机点做推理
 
 ```bash
-python scripts/benchmark_nn_vs_newton.py \
+python scripts/demo_random_inference.py \
     --checkpoint models/my_model/best_model.pt \
     --matrix-size 20 \
     --seed 0 \
-    --max-steps 16000 \
-    --output-dir results/bench_demo
+    --output-dir results/random_demo
 ```
-
-benchmark 默认串行执行，先跑 `NN + ODE`，再跑 `Newton PC`。
-
-Benchmark 输出包括：
-
-- `results/bench_demo/comparison_plot.png`
-- `results/bench_demo/comparison_summary.json`
-- `results/bench_demo/trajectories.npz`
-- `results/bench_demo/random_matrix.npy`
-- `results/bench_demo/logs/.../nn/summary.json`
-
-其中 benchmark 只额外保留 NN 的 summary 文件，不再额外写 baseline summary 或 step 日志。
 
 ### 6. 对自己的矩阵做追踪
 
@@ -129,12 +129,18 @@ python scripts/run_tracking.py \
 ```text
 proj/
 ├── configs/
-│   └── default.yaml
+│   ├── default.yaml
+│   └── training.yaml
 ├── scripts/
 │   ├── generate_large_dataset.py
 │   ├── train_from_dataset.py
+│   ├── evaluate.py
+│   ├── demo_random_inference.py
+│   ├── run_tracking.py
 │   ├── benchmark_nn_vs_newton.py
-│   └── run_tracking.py
+│   ├── run_newton_baseline.py
+│   ├── generate_data.py
+│   └── train_controller.py
 ├── src/
 └── tests/
 ```
@@ -163,15 +169,8 @@ proj/
 
 ### 4. 专家数据
 
-训练标签来自高精度专家策略和 `DAgger` 增强。
+训练标签来自高精度专家策略：
 
-## 测试
-
-```bash
-pytest tests -v
-```
-
-## 文档
-
-- [SERVER_TUTORIAL.md](SERVER_TUTORIAL.md)
-- [DATASET_EXPLANATION.md](DATASET_EXPLANATION.md)
+- 专家推进器：高精度 ODE / 纠偏推进
+- 专家重启：残差/漂移阈值触发
+- 数据增强：`DAgger`
