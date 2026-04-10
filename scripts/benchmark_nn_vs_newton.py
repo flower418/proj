@@ -132,81 +132,69 @@ def save_comparison_plot(
 
     nn_traj = np.asarray(nn_result["trajectory"], dtype=np.complex128)
     base_traj = np.asarray(baseline_result["trajectory"], dtype=np.complex128)
-    ax.plot(
-        np.real(base_traj),
-        np.imag(base_traj),
-        color="#fff4e6",
-        linewidth=6.0,
-        alpha=0.95,
-        linestyle=(0, (8, 3.2)),
-        zorder=4,
+    nn_line, = ax.plot(
+        np.real(nn_traj),
+        np.imag(nn_traj),
+        color="#0f4c81",
+        linewidth=2.8,
+        linestyle="-",
+        alpha=0.90,
+        label="NN + ODE",
+        zorder=6,
+    )
+    nn_line.set_path_effects(
+        [
+            pe.Stroke(linewidth=nn_line.get_linewidth() + 1.4, foreground="white", alpha=0.88),
+            pe.Normal(),
+        ]
+    )
+
+    nn_markers = sample_marker_points(nn_traj, count=12, phase=0.0)
+    base_markers = sample_marker_points(base_traj, count=12, phase=0.35)
+    ax.scatter(
+        np.real(base_markers),
+        np.imag(base_markers),
+        s=22,
+        marker="^",
+        facecolors=(1.0, 0.92, 0.84, 0.18),
+        edgecolors=(0.85, 0.37, 0.01, 0.55),
+        linewidths=0.8,
+        zorder=6,
+    )
+    ax.scatter(
+        np.real(nn_markers),
+        np.imag(nn_markers),
+        s=24,
+        marker="o",
+        facecolors=(0.06, 0.30, 0.51, 0.95),
+        edgecolors="white",
+        linewidths=0.8,
+        zorder=7,
     )
     base_line, = ax.plot(
         np.real(base_traj),
         np.imag(base_traj),
         color="#d95f02",
-        linewidth=4.2,
-        alpha=0.82,
-        linestyle=(0, (8, 3.2)),
+        linewidth=3.6,
+        alpha=0.58,
+        linestyle=(0, (7.5, 3.5)),
         solid_capstyle="round",
         dash_capstyle="round",
         label="Newton PC",
-        zorder=5,
-    )
-    ax.plot(
-        np.real(nn_traj),
-        np.imag(nn_traj),
-        color="white",
-        linewidth=4.0,
-        alpha=0.94,
-        linestyle="-",
-        zorder=6,
-    )
-    nn_line, = ax.plot(
-        np.real(nn_traj),
-        np.imag(nn_traj),
-        color="#0f4c81",
-        linewidth=2.4,
-        linestyle="-",
-        label="NN + ODE",
-        zorder=7,
-    )
-    for line in (nn_line, base_line):
-        line.set_path_effects(
-            [
-                pe.Stroke(linewidth=line.get_linewidth() + 0.8, foreground="white", alpha=0.9),
-                pe.Normal(),
-            ]
-        )
-
-    nn_markers = sample_marker_points(nn_traj, count=14, phase=0.0)
-    base_markers = sample_marker_points(base_traj, count=14, phase=0.45)
-    ax.scatter(
-        np.real(base_markers),
-        np.imag(base_markers),
-        s=42,
-        marker="^",
-        facecolors="white",
-        edgecolors="#d95f02",
-        linewidths=1.2,
-        alpha=0.95,
         zorder=8,
     )
-    ax.scatter(
-        np.real(nn_markers),
-        np.imag(nn_markers),
-        s=28,
-        marker="o",
-        facecolors="#0f4c81",
-        edgecolors="white",
-        linewidths=0.8,
-        alpha=0.95,
-        zorder=9,
+    base_line.set_path_effects(
+        [
+            pe.Stroke(linewidth=base_line.get_linewidth() + 1.0, foreground="white", alpha=0.75),
+            pe.Normal(),
+        ]
     )
-    ax.scatter(np.real(z_random), np.imag(z_random), c="#2a9d8f", s=120, marker="X", edgecolors="black", linewidths=0.7, label="Random Point", zorder=10)
-    ax.scatter(np.real(z0), np.imag(z0), c="white", s=90, marker="o", edgecolors="black", linewidths=1.1, label="Start", zorder=10)
-    ax.scatter(np.real(nn_traj[-1]), np.imag(nn_traj[-1]), c="#0f4c81", s=80, marker="s", edgecolors="white", linewidths=0.9, label="NN End", zorder=10)
-    ax.scatter(np.real(base_traj[-1]), np.imag(base_traj[-1]), c="#d95f02", s=82, marker="D", edgecolors="white", linewidths=0.9, label="Newton End", zorder=10)
+    ax.scatter(
+        np.real(z_random), np.imag(z_random), c="#2a9d8f", s=115, marker="X", edgecolors="black", linewidths=0.7, label="Random Point", zorder=10
+    )
+    ax.scatter(np.real(z0), np.imag(z0), c="white", s=92, marker="o", edgecolors="black", linewidths=1.1, label="Start", zorder=10)
+    ax.scatter(np.real(nn_traj[-1]), np.imag(nn_traj[-1]), c="#0f4c81", s=82, marker="s", edgecolors="white", linewidths=0.9, label="NN End", zorder=10)
+    ax.scatter(np.real(base_traj[-1]), np.imag(base_traj[-1]), c="#d95f02", s=84, marker="D", edgecolors="white", linewidths=0.9, label="Newton End", zorder=10)
 
     ax.set_xlabel("Re(z)")
     ax.set_ylabel("Im(z)")
