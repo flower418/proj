@@ -16,9 +16,9 @@ FAST_TANGENT_TRACKER_KWARGS = {
     "projection_defer_factor": 4.0,
     "projection_defer_distance_ratio": 0.08,
     "max_deferred_projection_steps": 6,
-    "exact_triplet_refresh_interval": 4,
-    "approx_triplet_sigma_tol": 1.0e-3,
-    "approx_triplet_residual_tol": 1.0e-2,
+    "exact_triplet_refresh_interval": 8,
+    "approx_triplet_sigma_tol": 5.0e-3,
+    "approx_triplet_residual_tol": 5.0e-2,
 }
 
 
@@ -231,6 +231,15 @@ class ContourTracker:
         residual = float(np.linalg.norm(Mv - self.epsilon * u_candidate))
         return sigma_approx, residual
 
+    @staticmethod
+    def _estimate_projection_distance_from_triplet(
+        sigma_error: float,
+        u_candidate: np.ndarray,
+        v_candidate: np.ndarray,
+    ) -> float:
+        gamma_norm = abs(np.vdot(v_candidate, u_candidate))
+        return float(sigma_error / max(gamma_norm, 1e-12))
+
     def _advance_with_backtracking(
         self,
         z: complex,
@@ -276,6 +285,12 @@ class ContourTracker:
                 )
                 sigma_error_approx = abs(sigma_approx - self.epsilon)
                 residual_limit = max(float(self.approx_triplet_residual_tol), 1.25 * max(ds_try, self.min_step_size))
+                approx_projection_distance = self._estimate_projection_distance_from_triplet(
+                    sigma_error=sigma_error_approx,
+                    u_candidate=u_candidate,
+                    v_candidate=v_candidate,
+                )
+                relaxed_projection_tol = self.projection_tol * self.projection_defer_factor
                 if sigma_error_approx <= self.approx_triplet_sigma_tol and residual_approx <= residual_limit:
                     return z_candidate, u_candidate, v_candidate, ds_try, {
                         "backtracks": backtrack_idx,
@@ -291,6 +306,51 @@ class ContourTracker:
                         "triplet_residual": float(residual_approx),
                         "exact_triplet_refresh": False,
                     }
+                allow_approx_deferred_projection = (
+                    self.max_deferred_projection_steps > 0
+                    and deferred_projection_streak < self.max_deferred_projection_steps
+                    and sigma_error_approx <= relaxed_projection_tol
+                    and approx_projection_distance <= self.projection_defer_distance_ratio * max(ds_try, self.min_step_size)
+                    and residual_approx <= 2.0 * residual_limit
+                )
+                if allow_approx_deferred_projection:
+                    return z_candidate, u_candidate, v_candidate, ds_try, {
+                        "backtracks": backtrack_idx,
+                        "applied_projection": False,
+                        "sigma": float(sigma_approx),
+                        "sigma_error": float(sigma_error_approx),
+                        "raw_sigma": float(sigma_approx),
+                        "raw_sigma_error": float(sigma_error_approx),
+                        "projection_distance": 0.0,
+                        "projection_expansions": 0,
+                        "projection_mode": "deferred_accept",
+                        "estimated_projection_distance": float(approx_projection_distance),
+                        "triplet_refresh_mode": "approx_deferred_accept",
+                        "triplet_residual": float(residual_approx),
+                        "exact_triplet_refresh": False,
+                    }
+                approx_projection_window = max(6.0 * float(self.approx_triplet_sigma_tol), 3.0 * relaxed_projection_tol)
+                if sigma_error_approx <= approx_projection_window and residual_approx <= 3.0 * residual_limit:
+                    local_projection = self._project_to_contour_locally(
+                        z_candidate,
+                        search_radius=ds_try,
+                        sigma_candidate=float(sigma_approx),
+                        u_candidate=u_candidate,
+                        v_candidate=v_candidate,
+                    )
+                    if local_projection is not None:
+                        z_projected, u_projected, v_projected, projection_info = local_projection
+                        if projection_info["sigma_error"] <= max(self.projection_tol, 1e-8):
+                            return z_projected, u_projected, v_projected, ds_try, {
+                                "backtracks": backtrack_idx,
+                                "applied_projection": True,
+                                "raw_sigma": float(sigma_approx),
+                                "raw_sigma_error": float(sigma_error_approx),
+                                **projection_info,
+                                "triplet_refresh_mode": "approx_local_projection",
+                                "triplet_residual": float(residual_approx),
+                                "exact_triplet_refresh": True,
+                            }
 
             sigma_candidate, u_exact, v_exact = self.svd_solver(self.A, z_candidate)
             u_exact = u_exact / max(np.linalg.norm(u_exact), 1e-15)
@@ -315,8 +375,11 @@ class ContourTracker:
                     "exact_triplet_refresh": True,
                 }
 
-            gamma_norm = abs(np.vdot(v_exact, u_exact))
-            estimated_projection_distance = sigma_error / max(gamma_norm, 1e-12)
+            estimated_projection_distance = self._estimate_projection_distance_from_triplet(
+                sigma_error=sigma_error,
+                u_candidate=u_exact,
+                v_candidate=v_exact,
+            )
             relaxed_projection_tol = self.projection_tol * self.projection_defer_factor
             allow_deferred_projection = (
                 self.max_deferred_projection_steps > 0
