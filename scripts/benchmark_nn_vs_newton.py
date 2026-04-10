@@ -367,6 +367,7 @@ def main():
             restart_threshold=args.restart_threshold,
             summary_path=run_logger.log_dir / "nn" / "summary.json",
         )
+        run_logger.log(f"nn {nn_run['elapsed_seconds']:.3f}s")
         run_logger.log("newton")
         baseline_run = run_newton_benchmark(
             A=A,
@@ -381,6 +382,7 @@ def main():
             max_corrector_iters=args.baseline_max_corrector_iters,
             max_step_halvings=args.baseline_max_step_halvings,
         )
+        run_logger.log(f"newton {baseline_run['elapsed_seconds']:.3f}s")
         benchmark_elapsed = float(time.perf_counter() - benchmark_t0)
 
         nn_result = nn_run["result"]
