@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import json
 import time
 from pathlib import Path
@@ -359,40 +358,35 @@ def main():
             f"prepared instance n={args.matrix_size} type={matrix_type} "
             f"epsilon={epsilon:.6f} z_random={z_random} z0={z0}"
         )
-        run_logger.log("running NN + ODE and Newton baseline in parallel")
+        run_logger.log("running NN + ODE first, then Newton baseline")
         benchmark_t0 = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            nn_future = executor.submit(
-                run_nn_benchmark,
-                A=A,
-                epsilon=epsilon,
-                z0=z0,
-                checkpoint=args.checkpoint,
-                config=config,
-                max_steps=args.max_steps,
-                nn_min_step_size=args.nn_min_step_size,
-                restart_threshold=args.restart_threshold,
-                summary_path=run_logger.log_dir / "nn" / "summary.json",
-            )
-            baseline_future = executor.submit(
-                run_newton_benchmark,
-                A=A,
-                epsilon=epsilon,
-                z0=z0,
-                closure_tol=config["tracker"]["closure_tol"],
-                max_steps=args.max_steps,
-                initial_step_size=args.baseline_initial_step_size,
-                min_step_size=args.baseline_min_step_size,
-                max_step_size=args.baseline_max_step_size,
-                corrector_tol=args.baseline_corrector_tol,
-                max_corrector_iters=args.baseline_max_corrector_iters,
-                max_step_halvings=args.baseline_max_step_halvings,
-            )
-            nn_run = nn_future.result()
-            baseline_run = baseline_future.result()
+        nn_run = run_nn_benchmark(
+            A=A,
+            epsilon=epsilon,
+            z0=z0,
+            checkpoint=args.checkpoint,
+            config=config,
+            max_steps=args.max_steps,
+            nn_min_step_size=args.nn_min_step_size,
+            restart_threshold=args.restart_threshold,
+            summary_path=run_logger.log_dir / "nn" / "summary.json",
+        )
+        baseline_run = run_newton_benchmark(
+            A=A,
+            epsilon=epsilon,
+            z0=z0,
+            closure_tol=config["tracker"]["closure_tol"],
+            max_steps=args.max_steps,
+            initial_step_size=args.baseline_initial_step_size,
+            min_step_size=args.baseline_min_step_size,
+            max_step_size=args.baseline_max_step_size,
+            corrector_tol=args.baseline_corrector_tol,
+            max_corrector_iters=args.baseline_max_corrector_iters,
+            max_step_halvings=args.baseline_max_step_halvings,
+        )
         benchmark_elapsed = float(time.perf_counter() - benchmark_t0)
         run_logger.log(
-            f"parallel benchmark done wall_clock={benchmark_elapsed:.3f}s "
+            f"sequential benchmark done wall_clock={benchmark_elapsed:.3f}s "
             f"nn={nn_run['elapsed_seconds']:.3f}s newton={baseline_run['elapsed_seconds']:.3f}s"
         )
 
@@ -439,7 +433,7 @@ def main():
             "trajectories_path": str(traj_out),
             "log_dir": str(run_logger.log_dir),
             "run_log_path": str(run_logger.run_log_path),
-            "execution_mode": "parallel_threads",
+            "execution_mode": "sequential",
             "wall_clock_seconds": benchmark_elapsed,
             "total_time_seconds": benchmark_elapsed,
             "nn_summary_path": nn_run["summary_path"],

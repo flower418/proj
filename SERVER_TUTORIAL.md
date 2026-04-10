@@ -176,7 +176,7 @@ python scripts/benchmark_nn_vs_newton.py \
     --output-dir results/bench_seed0
 ```
 
-这个 benchmark 默认会并行跑 `NN + ODE` 和 `Newton PC`，所以整体耗时通常接近较慢的那一路。
+这个 benchmark 默认串行执行，先跑 `NN + ODE`，再跑 `Newton PC`。这样 `NN` 这一条会独占 CPU，单路速度最快。
 
 输出文件：
 
