@@ -19,12 +19,16 @@ from src.utils.demo_sampling import SUPPORTED_MATRIX_TYPES, build_random_matrix,
 from src.utils.run_logging import RunLogger
 
 
+PROGRESS_LOG_EVERY = 20
+
+
 def generate_trajectory(
     A: np.ndarray,
     epsilon: float,
     z0: complex,
     max_steps: int = 200,
     solver_config: dict = None,
+    step_progress_callback=None,
 ) -> List[Dict]:
     """生成单条更接近推理分布的 teacher-forced 轨迹。"""
     solver = PseudoinverseSolver(**(solver_config or {}))
@@ -132,6 +136,20 @@ def generate_trajectory(
             }
         )
         trajectory.append(step_record)
+        if step_progress_callback is not None and (step_idx + 1) % PROGRESS_LOG_EVERY == 0:
+            step_progress_callback(
+                {
+                    "step": int(step_idx + 1),
+                    "max_steps": int(max_steps),
+                    "z": z_next,
+                    "step_distance": float(step_distance),
+                    "path_length": float(path_length),
+                    "winding_angle": float(winding_angle),
+                    "y_restart": int(expert_result.y_restart),
+                    "applied_projection": bool(applied_projection),
+                    "sigma_error": float(expert_result.sigma_error),
+                }
+            )
 
         z, u, v = z_next, u_next, v_next
         prev_gamma_arg = float(np.angle(np.vdot(u, v)))
@@ -160,12 +178,22 @@ def generate_trajectory(
     return trajectory
 
 
-def augment_trajectory(trajectory: List[Dict], A: np.ndarray, epsilon: float, num_perturbations: int = 2):
+def augment_trajectory(
+    trajectory: List[Dict],
+    A: np.ndarray,
+    epsilon: float,
+    num_perturbations: int = 2,
+    progress_callback=None,
+):
     """DAgger 增强"""
     solver = PseudoinverseSolver()
     expert = ExpertSolver(A=A, epsilon=epsilon, solver=solver)
     augmenter = DAggerAugmenter(expert)
-    return augmenter.augment_trajectory(trajectory, num_perturbations_per_point=num_perturbations)
+    return augmenter.augment_trajectory(
+        trajectory,
+        num_perturbations_per_point=num_perturbations,
+        progress_callback=progress_callback,
+    )
 
 
 def _log_message(run_logger: RunLogger | None, message: str) -> None:
@@ -173,6 +201,24 @@ def _log_message(run_logger: RunLogger | None, message: str) -> None:
         print(message)
     else:
         run_logger.log(message)
+
+
+def _make_progress_printer(run_logger: RunLogger | None):
+    def _printer(info: dict) -> None:
+        step = int(info["step"])
+        max_steps = int(info.get("max_steps", 0))
+        _log_message(run_logger, f"      Teacher {step}/{max_steps}")
+
+    return _printer
+
+
+def _make_dagger_progress_printer(run_logger: RunLogger | None):
+    def _printer(info: dict) -> None:
+        processed = int(info.get("processed_queries", 0))
+        total = int(info.get("total_queries", 0))
+        _log_message(run_logger, f"      DAgger {processed}/{total}")
+
+    return _printer
 
 
 def generate_diverse_dataset(
@@ -238,7 +284,14 @@ def generate_diverse_dataset(
                 )
 
                 try:
-                    trajectory = generate_trajectory(A, epsilon, z0, max_steps)
+                    step_progress_printer = _make_progress_printer(run_logger)
+                    trajectory = generate_trajectory(
+                        A,
+                        epsilon,
+                        z0,
+                        max_steps,
+                        step_progress_callback=step_progress_printer,
+                    )
                     _log_message(
                         run_logger,
                         f"    Teacher 完成：{len(trajectory)} 步，开始 DAgger={dagger_factor}"
@@ -257,7 +310,14 @@ def generate_diverse_dataset(
                             stats["restart_samples"] += 1
 
                     if dagger_factor > 0:
-                        augmented = augment_trajectory(trajectory, A, epsilon, dagger_factor)
+                        dagger_progress_printer = _make_dagger_progress_printer(run_logger)
+                        augmented = augment_trajectory(
+                            trajectory,
+                            A,
+                            epsilon,
+                            dagger_factor,
+                            progress_callback=dagger_progress_printer,
+                        )
                         _log_message(run_logger, f"    DAgger 完成：{len(augmented)} 条增强样本")
                         for record in augmented:
                             record["matrix_type"] = matrix_type

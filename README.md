@@ -135,7 +135,6 @@ python scripts/benchmark_nn_vs_newton.py \
 Benchmark 输出包括：
 
 - `results/bench_demo/comparison_plot.png`
-- `results/bench_demo/nn_only_plot.png`
 - `results/bench_demo/comparison_summary.json`
 - `results/bench_demo/trajectories.npz`
 - `results/bench_demo/random_matrix.npy`

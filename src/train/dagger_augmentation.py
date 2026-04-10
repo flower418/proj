@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from src.nn.features import assemble_controller_features, extract_features
 from src.train.expert_solver import ExpertSolver
 from src.utils.contour_init import project_to_contour
+
+
+PROGRESS_LOG_EVERY = 20
 
 
 class DAggerAugmenter:
@@ -80,8 +83,15 @@ class DAggerAugmenter:
         ds_value = max(result.ds_expert, 1e-8)
         return ds_value, result.y_restart, result.residual, result.sigma_error
 
-    def augment_trajectory(self, trajectory: List[Dict], num_perturbations_per_point: int = 1) -> List[Dict]:
+    def augment_trajectory(
+        self,
+        trajectory: List[Dict],
+        num_perturbations_per_point: int = 1,
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> List[Dict]:
         augmented = []
+        total_queries = int(sum(1 for point in trajectory if point["y_restart"] == 0) * max(num_perturbations_per_point, 0))
+        processed_queries = 0
         for i, point in enumerate(trajectory):
             if point["y_restart"] == 1:
                 continue
@@ -96,6 +106,17 @@ class DAggerAugmenter:
                     steps_since_restart=int(point.get("steps_since_restart", self.expert.min_steps_before_restart)),
                 )
                 if y_restart == 1 and not self.keep_restart_samples:
+                    processed_queries += 1
+                    if progress_callback is not None and processed_queries % PROGRESS_LOG_EVERY == 0:
+                        progress_callback(
+                            {
+                                "processed_queries": int(processed_queries),
+                                "total_queries": int(total_queries),
+                                "generated_samples": int(len(augmented)),
+                                "trajectory_index": int(i + 1),
+                                "perturbation_index": int(j + 1),
+                            }
+                        )
                     continue
                 base_features = extract_features(
                     z=z_pert,
@@ -133,4 +154,15 @@ class DAggerAugmenter:
                         "source": "dagger",
                     }
                 )
+                processed_queries += 1
+                if progress_callback is not None and processed_queries % PROGRESS_LOG_EVERY == 0:
+                    progress_callback(
+                        {
+                            "processed_queries": int(processed_queries),
+                            "total_queries": int(total_queries),
+                            "generated_samples": int(len(augmented)),
+                            "trajectory_index": int(i + 1),
+                            "perturbation_index": int(j + 1),
+                        }
+                    )
         return augmented

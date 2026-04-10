@@ -179,7 +179,6 @@ python scripts/benchmark_nn_vs_newton.py \
 输出文件：
 
 - `results/bench_seed0/comparison_plot.png`
-- `results/bench_seed0/nn_only_plot.png`
 - `results/bench_seed0/comparison_summary.json`
 - `results/bench_seed0/trajectories.npz`
 - `results/bench_seed0/random_matrix.npy`

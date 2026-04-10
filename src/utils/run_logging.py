@@ -17,10 +17,6 @@ def _complex_parts(value: complex) -> list[float]:
     return [float(np.real(value)), float(np.imag(value))]
 
 
-def format_complex(value: complex) -> str:
-    return f"{float(np.real(value)):+.5f}{float(np.imag(value)):+.5f}j"
-
-
 def to_jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): to_jsonable(item) for key, item in value.items()}
@@ -200,30 +196,12 @@ def make_step_callback(
 
 
 def format_nn_step(info: dict[str, Any], label: str = "nn") -> str:
-    restart_prob = None
-    controller_info = info.get("controller_info")
-    if isinstance(controller_info, dict):
-        restart_prob = controller_info.get("restart_prob")
-    restart_prob_str = "None" if restart_prob is None else f"{float(restart_prob):.4f}"
-    raw_sigma_error = float(info.get("raw_sigma_error", info.get("sigma_error", 0.0)))
     return (
         f"[{label}] "
         f"step={int(info.get('step', 0)):05d} "
-        f"raw_ds={float(info.get('raw_ds', info.get('ds', 0.0))):.6f} "
         f"ds={float(info.get('ds', 0.0)):.6f} "
-        f"p_restart={restart_prob_str} "
-        f"need_restart={int(bool(info.get('need_restart', False)))} "
-        f"applied_restart={int(bool(info.get('applied_restart', False)))} "
-        f"projection={int(bool(info.get('applied_projection', False)))} "
-        f"backtracks={int(info.get('backtracks', 0))} "
-        f"|dz|={float(info.get('step_distance', 0.0)):.6f} "
+        f"restart={int(bool(info.get('applied_restart', False)))} "
         f"|z-z0|={float(info.get('distance_to_start', 0.0)):.6f} "
-        f"path={float(info.get('path_length', 0.0)):.6f} "
-        f"wind={float(info.get('winding_angle', 0.0)):.4f} "
-        f"raw_sigma_err={raw_sigma_error:.6e} "
-        f"sigma_err={float(info.get('sigma_error', 0.0)):.6e} "
-        f"triplet={str(info.get('triplet_refresh_mode', 'exact_svd'))} "
-        f"z={format_complex(complex(info.get('z_next', 0.0)))}"
     )
 
 
@@ -232,13 +210,5 @@ def format_newton_step(info: dict[str, Any], label: str = "newton") -> str:
         f"[{label}] "
         f"step={int(info.get('step', 0)):05d} "
         f"ds={float(info.get('ds', 0.0)):.6f} "
-        f"halvings={int(info.get('predictor_halvings', 0))} "
-        f"corrector_iters={int(info.get('corrector_iterations', 0))} "
-        f"line_search={int(info.get('line_search_backtracks', 0))} "
-        f"|dz|={float(info.get('step_distance', 0.0)):.6f} "
         f"|z-z0|={float(info.get('distance_to_start', 0.0)):.6f} "
-        f"path={float(info.get('path_length', 0.0)):.6f} "
-        f"wind={float(info.get('winding_angle', 0.0)):.4f} "
-        f"sigma_err={float(info.get('sigma_error', 0.0)):.6e} "
-        f"z={format_complex(complex(info.get('z_next', 0.0)))}"
     )
