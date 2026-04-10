@@ -115,6 +115,25 @@ class ContourTracker:
         eigvals = np.linalg.eigvals(self.A)
         return complex(eigvals[int(np.argmin(np.abs(eigvals - z0)))])
 
+    def _effective_closure_tol(self, last_step_size: float | None = None) -> float:
+        return float(
+            max(
+                self.closure_tol,
+                0.5 * float(last_step_size) if last_step_size is not None else 0.0,
+            )
+        )
+
+    @staticmethod
+    def _segment_distance_to_point(z_prev: complex, z_current: complex, point: complex) -> float:
+        segment = complex(z_current - z_prev)
+        segment_norm_sq = float(np.abs(segment) ** 2)
+        if segment_norm_sq <= 1e-24:
+            return float(np.abs(point - z_current))
+        t = float(np.real(np.conj(segment) * (point - z_prev)) / segment_norm_sq)
+        t = float(np.clip(t, 0.0, 1.0))
+        closest = z_prev + t * segment
+        return float(np.abs(closest - point))
+
     def check_closure(
         self,
         z_current: complex,
@@ -124,28 +143,25 @@ class ContourTracker:
         max_distance_from_start: float | None = None,
         winding_angle: float | None = None,
         last_step_size: float | None = None,
+        z_prev: complex | None = None,
     ) -> bool:
         if current_step < self.min_steps_before_closure:
             return False
-        effective_closure_tol = float(
-            max(
-                self.closure_tol,
-                0.5 * float(last_step_size) if last_step_size is not None else 0.0,
-            )
-        )
-        if np.abs(z_current - z_start) >= effective_closure_tol:
-            return False
-
         min_path_length = max(20.0 * self.closure_tol, 10.0 * self.fixed_step_size)
         min_escape_distance = max(10.0 * self.closure_tol, 5.0 * self.fixed_step_size)
-
         if path_length is not None and path_length < min_path_length:
             return False
         if max_distance_from_start is not None and max_distance_from_start < min_escape_distance:
             return False
         if winding_angle is not None and abs(winding_angle) < self.min_winding_angle:
             return False
-        return True
+
+        effective_closure_tol = self._effective_closure_tol(last_step_size)
+        if np.abs(z_current - z_start) < effective_closure_tol:
+            return True
+        if z_prev is None:
+            return False
+        return self._segment_distance_to_point(z_prev, z_current, z_start) < effective_closure_tol
 
     def _project_initial_point(self, z0: complex) -> tuple[complex, float]:
         sigma0 = sigma_min_at(self.A, z0)
@@ -566,7 +582,13 @@ class ContourTracker:
                 max_distance_from_start=max_distance_from_start,
                 winding_angle=winding_angle,
                 last_step_size=accepted_ds,
+                z_prev=z_prev,
             ):
+                if np.abs(z - z0) >= self._effective_closure_tol(accepted_ds):
+                    _, u_closure, v_closure = self.exact_svd_restart(z0)
+                    trajectory[-1] = z0
+                    u_history[-1] = u_closure.copy()
+                    v_history[-1] = v_closure.copy()
                 closed = True
                 break
 

@@ -43,6 +43,28 @@ def test_closure_detection():
     )
 
 
+def test_segment_closure_detection():
+    np.random.seed(5)
+    A = np.random.randn(6, 6) + 1j * np.random.randn(6, 6)
+    tracker = ContourTracker(
+        A=A,
+        epsilon=0.1,
+        ode_system=ManifoldODE(A, 0.1),
+        closure_tol=1e-3,
+        min_steps_before_closure=10,
+    )
+    assert tracker.check_closure(
+        z_current=0.02 + 0.006j,
+        z_start=0.0 + 0.0j,
+        z_prev=-0.02 + 0.006j,
+        current_step=14,
+        path_length=0.8,
+        max_distance_from_start=0.3,
+        winding_angle=2.1 * np.pi,
+        last_step_size=2e-2,
+    )
+
+
 def test_restart_improves_residual():
     np.random.seed(3)
     A = np.random.randn(8, 8) + 1j * np.random.randn(8, 8)
