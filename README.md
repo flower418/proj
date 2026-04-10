@@ -3,7 +3,7 @@
 这个项目做的是：
 
 - 给定矩阵 `A`
-- 给定一个起点 `z0`
+- 从复平面上的随机点或指定点出发
 - 追踪经过该点的 `epsilon`-伪谱等高线
 
 核心不是黑盒补轮廓，而是：
@@ -11,21 +11,15 @@
 - 白盒 ODE 负责沿等高线推进
 - 神经网络只负责预测步长 `ds` 和是否做一次精确 SVD 重启
 
-如果你想从任意复平面点出发，最直接的方式是先计算
-
-`epsilon = sigma_min(z0 I - A)`
-
-然后追踪这一条经过 `z0` 的闭合等高线。项目里的 `scripts/demo_random_inference.py` 就是按这个逻辑工作的。
-
 ## 推荐工作流
 
-当前最推荐、最完整的主流程是：
+当前建议的主流程只有这一条：
 
 1. 用 `scripts/generate_large_dataset.py` 生成离线数据集
 2. 用 `scripts/train_from_dataset.py` 训练控制器
-3. 用 `scripts/evaluate.py` 或 `scripts/demo_random_inference.py` 做评估和推理
+3. 用 `scripts/evaluate.py`、`scripts/demo_random_inference.py`、`scripts/run_newton_baseline.py`、`scripts/benchmark_nn_vs_newton.py` 做评估和对比
 
-`scripts/generate_data.py` 和 `scripts/train_controller.py` 仍然保留，但它们更适合小规模 smoke test，不是主实验流程。
+`scripts/generate_data.py` 和 `scripts/train_controller.py` 只适合小规模 smoke test。
 
 ## 快速开始
 
@@ -39,21 +33,59 @@ pip install -r requirements.txt
 
 ### 2. 生成训练数据
 
+当前 `generate_large_dataset.py` 的策略固定为：
+
+- 矩阵类型从内置支持集合中随机抽取
+- 从谱中心附近的复高斯分布随机取点
+- 用 `epsilon = sigma_min(zI - A)` 定义训练任务
+
+示例：
+
 ```bash
-python scripts/generate_large_dataset.py \
+python -u scripts/generate_large_dataset.py \
     --target-samples 10000 \
     --matrix-sizes 30 50 80 \
+    --trajectories-per-type 5 \
+    --max-steps 200 \
+    --dagger-factor 2 \
     --output-dir data/my_data \
+    --save-every 5000 \
     --seed 0
 ```
+
+支持的默认矩阵类型目前包括：
+
+- `random_complex`
+- `random_hermitian`
+- `random_real`
+- `ill_conditioned`
+- `random_normal`
+- `banded_nonnormal`
+- `low_rank_plus_noise`
+- `jordan_perturbed`
+- `block_structured`
 
 生成结果默认包括：
 
 - `data/my_data/dataset_full.npz`
 - `data/my_data/dataset_full_splits.npz`
 - `data/my_data/dataset_stats.json`
+- `data/my_data/logs/...`
 
-### 3. 训练控制器
+说明：
+
+- `target_samples` 是下限，不是严格上限；脚本按整条轨迹追加样本，最终样本数可能略高于目标值
+- train / val / test 划分优先按 `trajectory_id` 分组，避免同一轨迹同时进入不同 split
+
+### 3. 检查数据
+
+```bash
+python src/data/dataset.py --data-dir data/my_data
+```
+
+当前数据集的控制器输入维度是 `14`。
+
+### 4. 训练控制器
 
 ```bash
 python scripts/train_from_dataset.py \
@@ -71,7 +103,7 @@ python scripts/train_from_dataset.py \
 - `models/my_model/test_metrics.json`
 - `logs/my_model/training_summary.png`
 
-### 4. 从随机点定义一条等高线并闭合追踪
+### 5. 从随机点做推理
 
 ```bash
 python scripts/demo_random_inference.py \
@@ -81,23 +113,7 @@ python scripts/demo_random_inference.py \
     --output-dir results/random_demo
 ```
 
-这个脚本会：
-
-- 随机生成一个矩阵 `A`
-- 随机抽取一个复平面点 `z_random`
-- 计算 `epsilon = sigma_min(z_random I - A)`
-- 从该点对应的等高线出发追踪完整闭合轮廓
-- 保存图像和摘要 JSON
-
-输出文件：
-
-- `results/random_demo/random_matrix.npy`
-- `results/random_demo/tracked_contour.png`
-- `results/random_demo/tracking_summary.json`
-
-### 5. 对你自己的矩阵做追踪
-
-如果你已经有矩阵文件：
+### 6. 对自己的矩阵做追踪
 
 ```bash
 python scripts/run_tracking.py \
@@ -107,12 +123,6 @@ python scripts/run_tracking.py \
     --result-out results/trajectory.json \
     --epsilon 0.1
 ```
-
-说明：
-
-- 如果你显式给 `--epsilon`，脚本追踪的是 `sigma_min(zI-A)=epsilon` 这条等高线
-- 如果你再给 `--z0-real` 和 `--z0-imag`，脚本会先把这个猜测点投影到真实等高线上
-- 如果你不提供 `z0`，脚本会自动从极值特征值附近选一个起点
 
 ## 项目结构
 
@@ -127,33 +137,11 @@ proj/
 │   ├── evaluate.py
 │   ├── demo_random_inference.py
 │   ├── run_tracking.py
+│   ├── benchmark_nn_vs_newton.py
+│   ├── run_newton_baseline.py
 │   ├── generate_data.py
 │   └── train_controller.py
 ├── src/
-│   ├── core/
-│   │   ├── manifold_ode.py
-│   │   ├── pseudoinverse.py
-│   │   └── contour_tracker.py
-│   ├── data/
-│   │   └── dataset.py
-│   ├── nn/
-│   │   ├── controller.py
-│   │   ├── features.py
-│   │   └── loss.py
-│   ├── train/
-│   │   ├── expert_solver.py
-│   │   ├── dagger_augmentation.py
-│   │   ├── data_generator.py
-│   │   ├── trainer.py
-│   │   └── logger.py
-│   ├── solvers/
-│   │   └── rk4.py
-│   └── utils/
-│       ├── contour_init.py
-│       ├── svd.py
-│       ├── metrics.py
-│       ├── visualization.py
-│       └── config.py
 └── tests/
 ```
 
@@ -170,16 +158,7 @@ proj/
 
 ### 2. 控制器输入
 
-网络输入是 7 维标量特征：
-
-- 奇异值偏差
-- 向量模长漂移
-- 残差范数
-- 梯度模长
-- 曲率代理量
-- 伪逆求解器迭代次数
-
-这些特征与矩阵维度无关。
+当前特征由 10 个基础特征和 4 个上下文特征拼接而成，总维度为 `14`。
 
 ### 3. 控制器输出
 
@@ -192,44 +171,9 @@ proj/
 
 训练标签来自高精度专家策略：
 
-- 专家推进器：`RK45`
+- 专家推进器：高精度 ODE / 纠偏推进
 - 专家重启：残差/漂移阈值触发
 - 数据增强：`DAgger`
-
-## 重要实现约定
-
-- `demo_random_inference.py` 在 `sample_mode=point_sigma` 下，追踪的是“经过随机点的那条等高线”
-- `run_tracking.py` 在固定 `epsilon` 下，若用户给的是一个猜测点，会先投影到真实等高线
-- 默认 `tracker.max_steps=4000`，因为闭合检测对步长敏感，预算过小会让本应闭合的轨迹提前停止
-
-## 默认配置摘要
-
-`configs/default.yaml` 当前关键默认值：
-
-```yaml
-ode:
-  epsilon: 0.1
-  initial_step_size: 0.01
-  min_step_size: 1.0e-6
-  max_step_size: 0.1
-
-solver:
-  method: minres
-  tol: 1.0e-8
-  max_iter: 500
-
-tracker:
-  max_steps: 4000
-  closure_tol: 1.0e-3
-  restart_drift_threshold: 1.0e-4
-
-controller:
-  hidden_dims: [64, 64]
-  dropout: 0.1
-  norm_type: layernorm
-  step_size_min: 1.0e-4
-  step_size_max: 0.1
-```
 
 ## 测试
 
@@ -241,12 +185,6 @@ pytest tests -v
 
 - [SERVER_TUTORIAL.md](SERVER_TUTORIAL.md)
 - [DATASET_EXPLANATION.md](DATASET_EXPLANATION.md)
-
-## 说明
-
-- 一次运行只追踪一个连通等高线分量
-- 起点决定你追踪的是哪一条分量
-- 神经网络不会替代伪谱定义，只是在数值推进时做控制
 
 ## License
 

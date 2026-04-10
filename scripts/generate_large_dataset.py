@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
-from scipy.optimize import brentq
 
 import _bootstrap  # noqa: F401
 
@@ -16,57 +15,137 @@ from src.core.pseudoinverse import PseudoinverseSolver
 from src.nn.features import assemble_controller_features, extract_features
 from src.train.dagger_augmentation import DAggerAugmenter
 from src.train.expert_solver import ExpertSolver
-from src.utils.contour_init import project_to_contour, sigma_min_at
-from src.utils.demo_sampling import sample_random_point
+from src.utils.contour_init import sigma_min_at
 from src.utils.run_logging import RunLogger
+
+
+SUPPORTED_MATRIX_TYPES = (
+    "random_complex",
+    "random_hermitian",
+    "random_real",
+    "ill_conditioned",
+    "random_normal",
+    "banded_nonnormal",
+    "low_rank_plus_noise",
+    "jordan_perturbed",
+    "block_structured",
+)
 
 
 class MatrixGenerator:
     """生成各种类型的矩阵"""
 
     @staticmethod
-    def random_complex(n: int, seed: int = 0) -> np.ndarray:
+    def random_complex(n: int, rng: np.random.Generator) -> np.ndarray:
         """随机稠密复矩阵"""
-        rng = np.random.default_rng(seed)
         return rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
 
     @staticmethod
-    def random_hermitian(n: int, seed: int = 0) -> np.ndarray:
+    def random_hermitian(n: int, rng: np.random.Generator) -> np.ndarray:
         """随机 Hermitian 矩阵"""
-        rng = np.random.default_rng(seed)
         A = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
         return (A + A.conj().T) / 2
 
     @staticmethod
-    def random_real(n: int, seed: int = 0) -> np.ndarray:
+    def random_real(n: int, rng: np.random.Generator) -> np.ndarray:
         """随机实矩阵"""
-        rng = np.random.default_rng(seed)
         return rng.standard_normal((n, n))
 
     @staticmethod
-    def ill_conditioned(n: int, condition_number: float = 1e6, seed: int = 0) -> np.ndarray:
+    def ill_conditioned(n: int, rng: np.random.Generator, condition_number: float = 1e6) -> np.ndarray:
         """病态矩阵"""
-        rng = np.random.default_rng(seed)
         U, _ = np.linalg.qr(rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)))
         V, _ = np.linalg.qr(rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)))
         sigma = np.geomspace(1.0, 1.0 / condition_number, n)
         return U @ np.diag(sigma) @ V.conj().T
 
+    @staticmethod
+    def random_normal(n: int, rng: np.random.Generator) -> np.ndarray:
+        """随机正规矩阵，特征向量正交，特征值为随机复数。"""
+        q, _ = np.linalg.qr(rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)))
+        eigvals = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        return q @ np.diag(eigvals) @ q.conj().T
 
-def find_contour_point(A: np.ndarray, epsilon: float, angle: float, max_iter: int = 50):
-    """在指定角度找到伪谱等高线上的点"""
-    n = A.shape[0]
+    @staticmethod
+    def banded_nonnormal(n: int, rng: np.random.Generator) -> np.ndarray:
+        """带状非正规矩阵，强调单侧耦合。"""
+        diag = 0.2 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+        upper = 0.9 * (rng.standard_normal(n - 1) + 1j * rng.standard_normal(n - 1)) if n > 1 else np.array([], dtype=np.complex128)
+        lower = 0.15 * (rng.standard_normal(n - 1) + 1j * rng.standard_normal(n - 1)) if n > 1 else np.array([], dtype=np.complex128)
+        A = np.diag(diag.astype(np.complex128))
+        if n > 1:
+            A += np.diag(upper.astype(np.complex128), 1)
+            A += np.diag(lower.astype(np.complex128), -1)
+        if n > 2:
+            second_upper = 0.08 * (rng.standard_normal(n - 2) + 1j * rng.standard_normal(n - 2))
+            A += np.diag(second_upper.astype(np.complex128), 2)
+        return A
 
-    def objective(r):
-        z = r * np.exp(1j * angle)
-        M = z * np.eye(n, dtype=np.complex128) - A
-        return np.min(np.linalg.svd(M, compute_uv=False)) - epsilon
+    @staticmethod
+    def low_rank_plus_noise(n: int, rng: np.random.Generator) -> np.ndarray:
+        """低秩主导矩阵，加少量噪声避免完全退化。"""
+        rank = max(2, min(n // 6, 8))
+        U = rng.standard_normal((n, rank)) + 1j * rng.standard_normal((n, rank))
+        V = rng.standard_normal((n, rank)) + 1j * rng.standard_normal((n, rank))
+        low_rank = (U @ V.conj().T) / max(np.sqrt(rank), 1.0)
+        noise = 0.05 * (rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)))
+        return low_rank + noise
 
-    try:
-        r_sol = brentq(objective, 0.1, 5.0, maxiter=max_iter)
-        return r_sol * np.exp(1j * angle)
-    except ValueError:
-        return None
+    @staticmethod
+    def jordan_perturbed(n: int, rng: np.random.Generator) -> np.ndarray:
+        """近 Jordan 块矩阵，加入小扰动避免完全重复。"""
+        lam = complex(rng.standard_normal(), rng.standard_normal())
+        A = lam * np.eye(n, dtype=np.complex128)
+        if n > 1:
+            A += np.diag(np.ones(n - 1, dtype=np.complex128), 1)
+        A += 0.01 * (rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)))
+        return A
+
+    @staticmethod
+    def block_structured(n: int, rng: np.random.Generator) -> np.ndarray:
+        """块结构矩阵，组合不同谱形态并加弱耦合。"""
+        split = max(1, n // 2)
+        A = np.zeros((n, n), dtype=np.complex128)
+        A11 = MatrixGenerator.random_complex(split, rng)
+        A22 = MatrixGenerator.random_hermitian(n - split, rng) if n - split > 0 else np.zeros((0, 0), dtype=np.complex128)
+        A[:split, :split] = A11
+        if n - split > 0:
+            A[split:, split:] = A22 + (1.5 + 0.8j) * np.eye(n - split, dtype=np.complex128)
+            A[:split, split:] = 0.08 * (rng.standard_normal((split, n - split)) + 1j * rng.standard_normal((split, n - split)))
+            A[split:, :split] = 0.03 * (rng.standard_normal((n - split, split)) + 1j * rng.standard_normal((n - split, split)))
+        return A
+
+
+def sample_random_matrix_type(rng: np.random.Generator) -> str:
+    return str(SUPPORTED_MATRIX_TYPES[int(rng.integers(len(SUPPORTED_MATRIX_TYPES)))])
+
+
+def build_random_matrix(n: int, rng: np.random.Generator) -> tuple[str, np.ndarray]:
+    matrix_type = sample_random_matrix_type(rng)
+    A = getattr(MatrixGenerator, matrix_type)(n, rng)
+    return matrix_type, np.asarray(A, dtype=np.complex128)
+
+
+def sample_unrestricted_random_point(
+    A: np.ndarray,
+    rng: np.random.Generator,
+) -> tuple[complex, complex]:
+    """从谱中心附近的复高斯分布采样，无手工几何限制。"""
+    eigvals = np.linalg.eigvals(np.asarray(A, dtype=np.complex128))
+    center = complex(np.mean(eigvals))
+    spectral_scale = max(np.ptp(np.real(eigvals)), np.ptp(np.imag(eigvals)), 1.0)
+    z_random = center + spectral_scale * (rng.standard_normal() + 1j * rng.standard_normal())
+    anchor = complex(eigvals[int(np.argmin(np.abs(eigvals - z_random)))])
+    return complex(z_random), anchor
+
+
+def sample_random_contour_start(
+    A: np.ndarray,
+    rng: np.random.Generator,
+) -> tuple[complex, float, complex, complex]:
+    z_random, anchor = sample_unrestricted_random_point(A=A, rng=rng)
+    epsilon = float(sigma_min_at(A, z_random))
+    return complex(z_random), epsilon, complex(z_random), complex(anchor)
 
 
 def generate_trajectory(
@@ -223,192 +302,161 @@ def _log_message(run_logger: RunLogger | None, message: str) -> None:
         run_logger.log(message)
 
 
-def sample_contour_start(
-    A: np.ndarray,
-    rng: np.random.Generator,
-    epsilon_mode: str,
-    epsilon_value: float,
-    point_sampler: str,
-    radius_range: tuple[float, float],
-    box_padding: float,
-) -> tuple[complex, float, complex, complex]:
-    z_random, anchor = sample_random_point(
-        A=A,
-        rng=rng,
-        point_sampler=point_sampler,
-        radius_range=radius_range,
-        box_padding=box_padding,
-    )
-
-    if epsilon_mode == "point_sigma":
-        z0 = complex(z_random)
-        epsilon = float(sigma_min_at(A, z0))
-        return z0, epsilon, complex(z_random), complex(anchor)
-
-    if epsilon_mode in {"trained_epsilon", "fixed"}:
-        z0, sigma_at_start = project_to_contour(A, float(epsilon_value), z_random)
-        return complex(z0), float(sigma_at_start), complex(z_random), complex(anchor)
-
-    raise ValueError(f"Unsupported epsilon_mode: {epsilon_mode}")
-
-
 def generate_diverse_dataset(
     target_samples: int = 10000,
     matrix_sizes: List[int] = None,
-    matrix_types: List[str] = None,
     trajectories_per_type: int = 5,
     max_steps: int = 200,
     dagger_factor: int = 2,
     output_dir: str = "data",
     save_every: int = 5000,
     seed: int = 0,
-    epsilon_mode: str = "point_sigma",
-    epsilon_value: float = 0.1,
-    point_sampler: str = "around_eigenvalue",
-    radius_range: tuple[float, float] = (0.15, 0.35),
-    box_padding: float = 0.25,
     run_logger: RunLogger | None = None,
 ) -> Dict:
     """生成多样化数据集"""
     if matrix_sizes is None:
         matrix_sizes = [30, 50, 80]
-    if matrix_types is None:
-        matrix_types = ["random_complex", "random_hermitian", "random_real", "ill_conditioned"]
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     all_records = []
-    stats = {"total_samples": 0, "matrix_types": {}, "matrix_sizes": {}, "trajectories": 0, "restart_samples": 0}
+    stats = {
+        "total_samples": 0,
+        "matrix_types": {},
+        "matrix_sizes": {},
+        "trajectories": 0,
+        "restart_samples": 0,
+        "supported_matrix_types": list(SUPPORTED_MATRIX_TYPES),
+        "sampling_strategy": "random_point_sigma",
+        "feature_dim": None,
+    }
     rng = np.random.default_rng(seed)
     matrix_counter = 0
+    size_cursor = 0
+    last_saved_count = 0
+    while len(all_records) < target_samples:
+        n = int(matrix_sizes[size_cursor % len(matrix_sizes)])
+        size_cursor += 1
 
-    for matrix_type in matrix_types:
-        for n in matrix_sizes:
+        for traj_idx in range(trajectories_per_type):
             if len(all_records) >= target_samples:
                 break
 
+            matrix_type, A = build_random_matrix(n=n, rng=rng)
+            matrix_id = f"{matrix_type}_n{n}_m{matrix_counter:06d}"
+            matrix_counter += 1
             _log_message(run_logger, f"生成：{matrix_type}, n={n}")
 
-            for traj_idx in range(trajectories_per_type):
-                if len(all_records) >= target_samples:
-                    break
+            target_scale = max(len(matrix_sizes) * len(SUPPORTED_MATRIX_TYPES) * trajectories_per_type * 50, 1)
+            num_starts = max(2, min(8, target_samples // target_scale))
 
-                # 生成矩阵
-                A = getattr(MatrixGenerator, matrix_type)(n, seed=len(all_records))
-                matrix_id = f"{matrix_type}_n{n}_m{matrix_counter:06d}"
-                matrix_counter += 1
+            for start_idx in range(num_starts):
+                try:
+                    z0, epsilon, z_random, anchor = sample_random_contour_start(A=A, rng=rng)
+                except Exception as e:
+                    _log_message(run_logger, f"    起点采样失败：{e}")
+                    continue
 
-                # 生成多个起点
-                num_starts = max(2, target_samples // (len(matrix_types) * len(matrix_sizes) * trajectories_per_type * 50))
+                _log_message(
+                    run_logger,
+                    f"  轨迹 {traj_idx + 1}, 起点 {start_idx + 1}: "
+                    f"epsilon={epsilon:.6f}, z0 = {z0:.3f}"
+                )
 
-                for start_idx in range(num_starts):
-                    try:
-                        z0, epsilon, z_random, anchor = sample_contour_start(
-                            A=A,
-                            rng=rng,
-                            epsilon_mode=epsilon_mode,
-                            epsilon_value=epsilon_value,
-                            point_sampler=point_sampler,
-                            radius_range=radius_range,
-                            box_padding=box_padding,
-                        )
-                    except ValueError:
-                        continue
+                try:
+                    trajectory = generate_trajectory(A, epsilon, z0, max_steps)
+                    trajectory_id = f"{matrix_id}_s{start_idx:03d}"
 
-                    _log_message(
-                        run_logger,
-                        f"  轨迹 {traj_idx + 1}, 起点 {start_idx + 1}: "
-                        f"epsilon={epsilon:.6f}, z0 = {z0:.3f}"
-                    )
+                    for record in trajectory:
+                        record["matrix_type"] = matrix_type
+                        record["matrix_size"] = n
+                        record["matrix_id"] = matrix_id
+                        record["trajectory_id"] = trajectory_id
+                        record["epsilon"] = float(epsilon)
+                        all_records.append(record)
+                        stats["total_samples"] += 1
+                        if record["y_restart"] == 1:
+                            stats["restart_samples"] += 1
 
-                    try:
-                        trajectory = generate_trajectory(A, epsilon, z0, max_steps)
-                        trajectory_id = f"{matrix_id}_s{start_idx:03d}"
-
-                        # 添加原始记录
-                        for record in trajectory:
+                    if dagger_factor > 0:
+                        augmented = augment_trajectory(trajectory, A, epsilon, dagger_factor)
+                        for record in augmented:
                             record["matrix_type"] = matrix_type
                             record["matrix_size"] = n
                             record["matrix_id"] = matrix_id
                             record["trajectory_id"] = trajectory_id
+                            record["source"] = "dagger"
                             record["epsilon"] = float(epsilon)
-                            record["sample_mode"] = epsilon_mode
                             all_records.append(record)
                             stats["total_samples"] += 1
                             if record["y_restart"] == 1:
                                 stats["restart_samples"] += 1
+                    else:
+                        augmented = []
 
-                        # DAgger 增强
-                        if dagger_factor > 0:
-                            augmented = augment_trajectory(trajectory, A, epsilon, dagger_factor)
-                            for record in augmented:
-                                record["matrix_type"] = matrix_type
-                                record["matrix_size"] = n
-                                record["matrix_id"] = matrix_id
-                                record["trajectory_id"] = trajectory_id
-                                record["source"] = "dagger"
-                                record["epsilon"] = float(epsilon)
-                                record["sample_mode"] = epsilon_mode
-                                all_records.append(record)
-                                stats["total_samples"] += 1
-                                if record["y_restart"] == 1:
-                                    stats["restart_samples"] += 1
+                    if stats["feature_dim"] is None and trajectory:
+                        stats["feature_dim"] = int(np.asarray(trajectory[0]["features"]).shape[-1])
 
-                        stats["trajectories"] += 1
-                        stats["matrix_types"][matrix_type] = int(stats["matrix_types"].get(matrix_type, 0) + len(trajectory) + (len(augmented) if dagger_factor > 0 else 0))
-                        size_key = str(n)
-                        stats["matrix_sizes"][size_key] = int(stats["matrix_sizes"].get(size_key, 0) + len(trajectory) + (len(augmented) if dagger_factor > 0 else 0))
+                    stats["trajectories"] += 1
+                    stats["matrix_types"][matrix_type] = int(stats["matrix_types"].get(matrix_type, 0) + len(trajectory) + len(augmented))
+                    size_key = str(n)
+                    stats["matrix_sizes"][size_key] = int(stats["matrix_sizes"].get(size_key, 0) + len(trajectory) + len(augmented))
+                    if run_logger is not None:
+                        run_logger.append_jsonl(
+                            "progress.jsonl",
+                            {
+                                "event": "trajectory_done",
+                                "matrix_type": matrix_type,
+                                "matrix_size": n,
+                                "trajectory_index": traj_idx,
+                                "start_index": start_idx,
+                                "epsilon": float(epsilon),
+                                "random_point": [float(np.real(z_random)), float(np.imag(z_random))],
+                                "start_point": [float(np.real(z0)), float(np.imag(z0))],
+                                "nearest_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
+                                "raw_samples": len(trajectory),
+                                "augmented_samples": len(augmented),
+                                "total_samples": stats["total_samples"],
+                                "restart_samples": stats["restart_samples"],
+                            },
+                        )
+
+                    if save_every > 0 and len(all_records) - last_saved_count >= save_every:
+                        save_dataset(all_records, output_path, f"partial_{len(all_records)}", rng=rng)
+                        last_saved_count = len(all_records)
+                        _log_message(run_logger, f"    已保存 {len(all_records)} 样本")
                         if run_logger is not None:
                             run_logger.append_jsonl(
                                 "progress.jsonl",
                                 {
-                                    "event": "trajectory_done",
-                                    "matrix_type": matrix_type,
-                                    "matrix_size": n,
-                                    "trajectory_index": traj_idx,
-                                    "start_index": start_idx,
-                                    "epsilon": float(epsilon),
-                                    "sample_mode": epsilon_mode,
-                                    "random_point": [float(np.real(z_random)), float(np.imag(z_random))],
-                                    "start_point": [float(np.real(z0)), float(np.imag(z0))],
-                                    "nearest_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
-                                    "raw_samples": len(trajectory),
-                                    "augmented_samples": len(augmented) if dagger_factor > 0 else 0,
-                                    "total_samples": stats["total_samples"],
-                                    "restart_samples": stats["restart_samples"],
+                                    "event": "partial_save",
+                                    "total_samples": len(all_records),
+                                    "save_every": save_every,
                                 },
                             )
 
-                        # 定期保存
-                        if len(all_records) % save_every == 0:
-                            save_dataset(all_records, output_path, f"partial_{len(all_records)}", rng=rng)
-                            _log_message(run_logger, f"    已保存 {len(all_records)} 样本")
-                            if run_logger is not None:
-                                run_logger.append_jsonl(
-                                    "progress.jsonl",
-                                    {
-                                        "event": "partial_save",
-                                        "total_samples": len(all_records),
-                                        "save_every": save_every,
-                                    },
-                                )
+                    if len(all_records) >= target_samples:
+                        break
 
-                    except Exception as e:
-                        _log_message(run_logger, f"    失败：{e}")
-                        if run_logger is not None:
-                            run_logger.append_jsonl(
-                                "progress.jsonl",
-                                {
-                                    "event": "trajectory_failed",
-                                    "matrix_type": matrix_type,
-                                    "matrix_size": n,
-                                    "trajectory_index": traj_idx,
-                                    "start_index": start_idx,
-                                    "error": str(e),
-                                },
-                            )
-                        continue
+                except Exception as e:
+                    _log_message(run_logger, f"    失败：{e}")
+                    if run_logger is not None:
+                        run_logger.append_jsonl(
+                            "progress.jsonl",
+                            {
+                                "event": "trajectory_failed",
+                                "matrix_type": matrix_type,
+                                "matrix_size": n,
+                                "trajectory_index": traj_idx,
+                                "start_index": start_idx,
+                                "error": str(e),
+                            },
+                        )
+                    continue
+
+            if len(all_records) >= target_samples:
+                break
 
     # 最终保存
     save_dataset(all_records, output_path, "dataset_full", stats, rng=rng)
@@ -425,7 +473,6 @@ def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict 
     matrix_type = np.array([str(r.get("matrix_type", "")) for r in records], dtype=np.str_)
     matrix_id = np.array([str(r.get("matrix_id", f"matrix_{idx}")) for idx, r in enumerate(records)], dtype=np.str_)
     trajectory_id = np.array([str(r.get("trajectory_id", f"trajectory_{idx}")) for idx, r in enumerate(records)], dtype=np.str_)
-    sample_mode = np.array([str(r.get("sample_mode", "")) for r in records], dtype=np.str_)
     source = np.array([str(r.get("source", "expert")) for r in records], dtype=np.str_)
 
     np.savez(
@@ -438,7 +485,6 @@ def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict 
         matrix_type=matrix_type,
         matrix_id=matrix_id,
         trajectory_id=trajectory_id,
-        sample_mode=sample_mode,
         source=source,
     )
 
@@ -488,18 +534,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="生成大规模数据集")
     parser.add_argument("--target-samples", type=int, default=10000)
     parser.add_argument("--matrix-sizes", type=int, nargs="+", default=[30, 50, 80])
-    parser.add_argument("--matrix-types", type=str, nargs="+", default=None)
     parser.add_argument("--trajectories-per-type", type=int, default=5)
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument("--dagger-factor", type=int, default=2)
     parser.add_argument("--output-dir", type=str, default="data")
     parser.add_argument("--save-every", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--epsilon-mode", choices=["point_sigma", "trained_epsilon", "fixed"], default="point_sigma")
-    parser.add_argument("--epsilon-value", type=float, default=0.1, help="Used when --epsilon-mode is trained_epsilon or fixed.")
-    parser.add_argument("--point-sampler", choices=["spectral_box", "around_eigenvalue"], default="around_eigenvalue")
-    parser.add_argument("--radius-range", type=float, nargs=2, default=(0.15, 0.35), metavar=("R_MIN", "R_MAX"))
-    parser.add_argument("--box-padding", type=float, default=0.25)
     parser.add_argument("--log-dir", type=str, default=None, help="Directory for runtime logs. Defaults to <output-dir>/logs.")
     return parser.parse_args()
 
@@ -512,18 +552,12 @@ def main():
         stats = generate_diverse_dataset(
             target_samples=args.target_samples,
             matrix_sizes=args.matrix_sizes,
-            matrix_types=args.matrix_types,
             trajectories_per_type=args.trajectories_per_type,
             max_steps=args.max_steps,
             dagger_factor=args.dagger_factor,
             output_dir=args.output_dir,
             save_every=args.save_every,
             seed=args.seed,
-            epsilon_mode=args.epsilon_mode,
-            epsilon_value=args.epsilon_value,
-            point_sampler=args.point_sampler,
-            radius_range=tuple(args.radius_range),
-            box_padding=args.box_padding,
             run_logger=run_logger,
         )
         summary_path = run_logger.write_json("generation_summary.json", stats)
