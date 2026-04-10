@@ -21,7 +21,7 @@ from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.config import load_yaml_config
 from src.utils.contour_compare import contour_distance_metrics
 from src.utils.demo_sampling import build_random_matrix, sample_random_contour_start
-from src.utils.run_logging import RunLogger, format_nn_step
+from src.utils.run_logging import RunLogger, format_newton_step, format_nn_step
 
 
 def parse_args():
@@ -75,7 +75,7 @@ def summarize_tracker_result(result: dict) -> dict:
     }
 
 
-def make_nn_console_callback(print_every: int = 20):
+def make_console_callback(formatter, label: str, print_every: int):
     print_every = max(int(print_every), 1)
 
     def _callback(info: dict) -> None:
@@ -84,7 +84,7 @@ def make_nn_console_callback(print_every: int = 20):
             return
         payload = dict(info)
         payload["step"] = step
-        print(format_nn_step(payload, label="nn"), flush=True)
+        print(formatter(payload, label=label), flush=True)
 
     return _callback
 
@@ -124,7 +124,7 @@ def run_nn_benchmark(
         min_step_size=config["ode"]["min_step_size"],
         **FAST_TANGENT_TRACKER_KWARGS,
     )
-    step_callback = make_nn_console_callback(print_every=20)
+    step_callback = make_console_callback(format_nn_step, label="nn", print_every=20)
     t0 = time.perf_counter()
     result = tracker.track(z0=z0, max_steps=max_steps, step_callback=step_callback)
     elapsed = float(time.perf_counter() - t0)
@@ -173,8 +173,9 @@ def run_newton_benchmark(
         max_step_halvings=max_step_halvings,
         closure_tol=closure_tol,
     )
+    step_callback = make_console_callback(format_newton_step, label="newton", print_every=50)
     t0 = time.perf_counter()
-    result = tracker.track(z0=z0, max_steps=max_steps)
+    result = tracker.track(z0=z0, max_steps=max_steps, step_callback=step_callback)
     elapsed = float(time.perf_counter() - t0)
     summary = summarize_tracker_result(result)
     summary.update(
@@ -346,7 +347,6 @@ def main():
         config = load_yaml_config(args.config)
 
         run_logger.write_json("run_config.json", {"args": vars(args), "config": config})
-        run_logger.log(f"benchmark start log_dir={run_logger.log_dir}")
 
         rng = np.random.default_rng(args.seed)
         prep_t0 = time.perf_counter()
@@ -354,11 +354,7 @@ def main():
         z0, epsilon, z_random, anchor = sample_random_contour_start(A=A, rng=rng)
         epsilon_compute_seconds = float(time.perf_counter() - prep_t0)
 
-        run_logger.log(
-            f"prepared instance n={args.matrix_size} type={matrix_type} "
-            f"epsilon={epsilon:.6f} z_random={z_random} z0={z0}"
-        )
-        run_logger.log("running NN + ODE first, then Newton baseline")
+        run_logger.log("nn")
         benchmark_t0 = time.perf_counter()
         nn_run = run_nn_benchmark(
             A=A,
@@ -371,6 +367,7 @@ def main():
             restart_threshold=args.restart_threshold,
             summary_path=run_logger.log_dir / "nn" / "summary.json",
         )
+        run_logger.log("newton")
         baseline_run = run_newton_benchmark(
             A=A,
             epsilon=epsilon,
@@ -385,10 +382,6 @@ def main():
             max_step_halvings=args.baseline_max_step_halvings,
         )
         benchmark_elapsed = float(time.perf_counter() - benchmark_t0)
-        run_logger.log(
-            f"sequential benchmark done wall_clock={benchmark_elapsed:.3f}s "
-            f"nn={nn_run['elapsed_seconds']:.3f}s newton={baseline_run['elapsed_seconds']:.3f}s"
-        )
 
         nn_result = nn_run["result"]
         baseline_result = baseline_run["result"]
@@ -453,9 +446,6 @@ def main():
         }
         with summary_out.open("w", encoding="utf-8") as fh:
             json.dump(summary, fh, indent=2)
-
-        run_logger.log(f"benchmark finished summary={summary_out}")
-        print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":
