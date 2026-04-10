@@ -200,7 +200,6 @@ def format_nn_step(info: dict[str, Any], label: str = "nn") -> str:
         f"[{label}] "
         f"step={int(info.get('step', 0)):05d} "
         f"ds={float(info.get('ds', 0.0)):.6f} "
-        f"restart={int(bool(info.get('applied_restart', False)))} "
         f"|z-z0|={float(info.get('distance_to_start', 0.0)):.6f} "
     )
 
