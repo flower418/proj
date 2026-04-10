@@ -58,6 +58,7 @@ def generate_trajectory(
     winding_angle = 0.0
 
     for step_idx in range(max_steps):
+        z_prev = z
         expert_result = expert._step_with_hint(z, u, v, steps_since_restart, step_hint)
 
         base_features = extract_features(
@@ -152,6 +153,7 @@ def generate_trajectory(
             max_distance_from_start=max_distance_from_start,
             winding_angle=winding_angle,
             last_step_size=max(float(expert_result.ds_expert), tracker.min_step_size),
+            z_prev=z_prev,
         ):
             break
 
@@ -237,6 +239,10 @@ def generate_diverse_dataset(
 
                 try:
                     trajectory = generate_trajectory(A, epsilon, z0, max_steps)
+                    _log_message(
+                        run_logger,
+                        f"    Teacher 完成：{len(trajectory)} 步，开始 DAgger={dagger_factor}"
+                    )
                     trajectory_id = f"{matrix_id}_s{start_idx:03d}"
 
                     for record in trajectory:
@@ -252,6 +258,7 @@ def generate_diverse_dataset(
 
                     if dagger_factor > 0:
                         augmented = augment_trajectory(trajectory, A, epsilon, dagger_factor)
+                        _log_message(run_logger, f"    DAgger 完成：{len(augmented)} 条增强样本")
                         for record in augmented:
                             record["matrix_type"] = matrix_type
                             record["matrix_size"] = n
@@ -265,6 +272,7 @@ def generate_diverse_dataset(
                                 stats["restart_samples"] += 1
                     else:
                         augmented = []
+                        _log_message(run_logger, "    DAgger 跳过：0 条增强样本")
 
                     if stats["feature_dim"] is None and trajectory:
                         stats["feature_dim"] = int(np.asarray(trajectory[0]["features"]).shape[-1])

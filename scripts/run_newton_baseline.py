@@ -11,8 +11,8 @@ import numpy as np
 import _bootstrap  # noqa: F401
 
 from src.baselines import NewtonPredictorCorrectorTracker
-from src.utils.contour_init import project_to_contour, sigma_min_at
-from src.utils.demo_sampling import generate_random_matrix, sample_random_point
+from src.utils.contour_init import sigma_min_at
+from src.utils.demo_sampling import build_random_matrix, sample_random_contour_start
 from src.utils.visualization import plot_pseudospectrum_background
 
 
@@ -20,14 +20,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run the Newton predictor-corrector contour baseline on a random matrix and random point.")
     parser.add_argument("--output-dir", default="results/newton_baseline")
     parser.add_argument("--matrix-size", type=int, default=20)
-    parser.add_argument("--matrix-type", choices=["complex", "real", "hermitian"], default="complex")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=16000)
-    parser.add_argument("--point-sampler", choices=["spectral_box", "around_eigenvalue"], default="spectral_box")
-    parser.add_argument("--sample-mode", choices=["trained_epsilon", "point_sigma"], default="point_sigma")
-    parser.add_argument("--epsilon-value", type=float, default=0.1)
-    parser.add_argument("--radius-range", type=float, nargs=2, default=(0.15, 0.35), metavar=("R_MIN", "R_MAX"))
-    parser.add_argument("--box-padding", type=float, default=0.25)
     parser.add_argument("--initial-step-size", type=float, default=1e-2)
     parser.add_argument("--min-step-size", type=float, default=1e-6)
     parser.add_argument("--max-step-size", type=float, default=1e-1)
@@ -83,22 +77,10 @@ def save_plot(
 def main():
     args = parse_args()
     rng = np.random.default_rng(args.seed)
-    A = generate_random_matrix(args.matrix_size, args.matrix_type, rng).astype(np.complex128)
-    z_random, anchor = sample_random_point(
-        A=A,
-        rng=rng,
-        point_sampler=args.point_sampler,
-        radius_range=tuple(args.radius_range),
-        box_padding=args.box_padding,
-    )
+    matrix_type, A = build_random_matrix(args.matrix_size, rng)
 
     prep_t0 = time.perf_counter()
-    if args.sample_mode == "trained_epsilon":
-        z0, epsilon = project_to_contour(A, args.epsilon_value, z_random)
-        epsilon = float(sigma_min_at(A, z0))
-    else:
-        z0 = z_random
-        epsilon = float(sigma_min_at(A, z0))
+    z0, epsilon, z_random, anchor = sample_random_contour_start(A=A, rng=rng)
     epsilon_compute_seconds = float(time.perf_counter() - prep_t0)
 
     tracker = NewtonPredictorCorrectorTracker(
@@ -135,10 +117,9 @@ def main():
         "plot_path": str(output_dir / "newton_baseline.png"),
         "trajectory_path": str(output_dir / "trajectory.npz"),
         "matrix_size": args.matrix_size,
-        "matrix_type": args.matrix_type,
+        "matrix_type": matrix_type,
         "seed": args.seed,
-        "point_sampler": args.point_sampler,
-        "sample_mode": args.sample_mode,
+        "sampling_strategy": "random_point_sigma",
         "epsilon_compute_seconds": epsilon_compute_seconds,
         "elapsed_seconds": elapsed_seconds,
         "epsilon": float(epsilon),

@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--checkpoint-dir", type=str, default="models")
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--learning-rate", type=float, default=None)

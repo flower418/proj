@@ -92,8 +92,7 @@ python scripts/train_from_dataset.py \
     --data-dir data/my_data \
     --experiment-name my_model \
     --epochs 50 \
-    --batch-size 256 \
-    --device cuda
+    --batch-size 256
 ```
 
 训练输出：
@@ -113,7 +112,35 @@ python scripts/demo_random_inference.py \
     --output-dir results/random_demo
 ```
 
-### 6. 对自己的矩阵做追踪
+### 6. 跑 Newton baseline
+
+```bash
+python scripts/run_newton_baseline.py \
+    --matrix-size 20 \
+    --seed 0 \
+    --output-dir results/newton_demo
+```
+
+### 7. 跑 NN vs Newton benchmark
+
+```bash
+python scripts/benchmark_nn_vs_newton.py \
+    --checkpoint models/my_model/best_model.pt \
+    --matrix-size 20 \
+    --seed 0 \
+    --max-steps 16000 \
+    --output-dir results/bench_demo
+```
+
+Benchmark 输出包括：
+
+- `results/bench_demo/comparison_plot.png`
+- `results/bench_demo/nn_only_plot.png`
+- `results/bench_demo/comparison_summary.json`
+- `results/bench_demo/trajectories.npz`
+- `results/bench_demo/random_matrix.npy`
+
+### 8. 对自己的矩阵做追踪
 
 ```bash
 python scripts/run_tracking.py \

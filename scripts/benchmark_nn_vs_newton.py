@@ -20,8 +20,8 @@ from src.nn.controller import NNController, build_controller_from_checkpoint
 from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.config import load_yaml_config
 from src.utils.contour_compare import contour_distance_metrics, resample_curve_by_arclength
-from src.utils.contour_init import project_to_contour, sigma_min_at
-from src.utils.demo_sampling import generate_random_matrix, sample_random_point
+from src.utils.contour_init import sigma_min_at
+from src.utils.demo_sampling import build_random_matrix, sample_random_contour_start
 from src.utils.run_logging import StepDiagnosticsCollector, RunLogger, format_newton_step, format_nn_step, make_step_callback
 from src.utils.visualization import plot_trajectory
 from src.utils.visualization import plot_pseudospectrum_background
@@ -35,14 +35,8 @@ def parse_args():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output-dir", default="results/nn_vs_newton")
     parser.add_argument("--matrix-size", type=int, default=20)
-    parser.add_argument("--matrix-type", choices=["complex", "real", "hermitian"], default="complex")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=16000)
-    parser.add_argument("--point-sampler", choices=["spectral_box", "around_eigenvalue"], default="spectral_box")
-    parser.add_argument("--sample-mode", choices=["trained_epsilon", "point_sigma"], default="point_sigma")
-    parser.add_argument("--radius-range", type=float, nargs=2, default=(0.15, 0.35), metavar=("R_MIN", "R_MAX"))
-    parser.add_argument("--box-padding", type=float, default=0.25)
-    parser.add_argument("--device", default="cpu")
     parser.add_argument("--nn-min-step-size", type=float, default=None)
     parser.add_argument("--restart-threshold", type=float, default=0.9)
     parser.add_argument("--baseline-initial-step-size", type=float, default=1e-2)
@@ -58,7 +52,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_controller(checkpoint_path: str, config: dict, device: torch.device) -> NNController:
+def load_controller(checkpoint_path: str, config: dict) -> NNController:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     controller = build_controller_from_checkpoint(
         checkpoint,
@@ -66,7 +60,6 @@ def load_controller(checkpoint_path: str, config: dict, device: torch.device) ->
         input_dim=int(config["controller"].get("input_dim", 7)),
     )
     controller.load_state_dict(checkpoint["model_state_dict"])
-    controller = controller.to(device)
     controller.eval()
     return controller
 
@@ -103,17 +96,31 @@ def compute_sigma_error_stats(
     }
 
 
+def sample_marker_points(trajectory: np.ndarray, count: int, phase: float = 0.0) -> np.ndarray:
+    traj = np.asarray(trajectory, dtype=np.complex128)
+    if len(traj) == 0:
+        return traj
+    if len(traj) <= count:
+        return traj
+    phase = float(np.clip(phase, 0.0, 0.95))
+    positions = np.linspace(phase, len(traj) - 1 - phase, count)
+    indices = np.unique(np.clip(np.round(positions).astype(int), 0, len(traj) - 1))
+    return traj[indices]
+
+
 def save_comparison_plot(
     A: np.ndarray,
     epsilon: float,
     z_random: complex,
+    z0: complex,
+    matrix_type: str,
     nn_result: dict,
     baseline_result: dict,
     nn_elapsed: float,
     baseline_elapsed: float,
     save_path: Path,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(11.2, 8.6))
 
     combined = [np.asarray(nn_result["trajectory"], dtype=np.complex128), np.asarray(baseline_result["trajectory"], dtype=np.complex128)]
     merged = np.concatenate(combined)
@@ -121,58 +128,100 @@ def save_comparison_plot(
     imag_margin = max(np.ptp(np.imag(merged)) * 0.12, 1.0)
     ax.set_xlim(np.real(merged).min() - real_margin, np.real(merged).max() + real_margin)
     ax.set_ylim(np.imag(merged).min() - imag_margin, np.imag(merged).max() + imag_margin)
-    plot_pseudospectrum_background(A, epsilon, ax, resolution=120, alpha=0.16)
+    plot_pseudospectrum_background(A, epsilon, ax, resolution=120, alpha=0.12)
 
     nn_traj = np.asarray(nn_result["trajectory"], dtype=np.complex128)
     base_traj = np.asarray(baseline_result["trajectory"], dtype=np.complex128)
-    nn_markevery = max(len(nn_traj) // 14, 1)
-    base_markevery = max(len(base_traj) // 14, 1)
-    nn_line, = ax.plot(
-        np.real(nn_traj),
-        np.imag(nn_traj),
-        color="#1f77b4",
-        linewidth=2.8,
-        linestyle="-",
-        marker="o",
-        markersize=4.6,
-        markerfacecolor="white",
-        markeredgewidth=1.0,
-        markevery=nn_markevery,
-        label="NN + ODE",
-        zorder=5,
+    ax.plot(
+        np.real(base_traj),
+        np.imag(base_traj),
+        color="#fff4e6",
+        linewidth=6.0,
+        alpha=0.95,
+        linestyle=(0, (8, 3.2)),
+        zorder=4,
     )
     base_line, = ax.plot(
         np.real(base_traj),
         np.imag(base_traj),
         color="#d95f02",
-        linewidth=2.8,
-        linestyle=(0, (6, 2.5)),
-        marker="^",
-        markersize=5.0,
-        markerfacecolor="white",
-        markeredgewidth=1.0,
-        markevery=base_markevery,
+        linewidth=4.2,
+        alpha=0.82,
+        linestyle=(0, (8, 3.2)),
+        solid_capstyle="round",
+        dash_capstyle="round",
         label="Newton PC",
-        zorder=4,
+        zorder=5,
+    )
+    ax.plot(
+        np.real(nn_traj),
+        np.imag(nn_traj),
+        color="white",
+        linewidth=4.0,
+        alpha=0.94,
+        linestyle="-",
+        zorder=6,
+    )
+    nn_line, = ax.plot(
+        np.real(nn_traj),
+        np.imag(nn_traj),
+        color="#0f4c81",
+        linewidth=2.4,
+        linestyle="-",
+        label="NN + ODE",
+        zorder=7,
     )
     for line in (nn_line, base_line):
         line.set_path_effects(
             [
-                pe.Stroke(linewidth=line.get_linewidth() + 1.8, foreground="white", alpha=0.95),
+                pe.Stroke(linewidth=line.get_linewidth() + 0.8, foreground="white", alpha=0.9),
                 pe.Normal(),
             ]
         )
-    ax.scatter(np.real(z_random), np.imag(z_random), c="green", s=110, marker="o", edgecolors="black", linewidths=0.6, label="Random Point", zorder=6)
-    ax.scatter(np.real(nn_traj[-1]), np.imag(nn_traj[-1]), c="tab:blue", s=70, marker="s", label="NN End", zorder=6)
-    ax.scatter(np.real(base_traj[-1]), np.imag(base_traj[-1]), c="tab:orange", s=70, marker="D", label="Newton End", zorder=6)
+
+    nn_markers = sample_marker_points(nn_traj, count=14, phase=0.0)
+    base_markers = sample_marker_points(base_traj, count=14, phase=0.45)
+    ax.scatter(
+        np.real(base_markers),
+        np.imag(base_markers),
+        s=42,
+        marker="^",
+        facecolors="white",
+        edgecolors="#d95f02",
+        linewidths=1.2,
+        alpha=0.95,
+        zorder=8,
+    )
+    ax.scatter(
+        np.real(nn_markers),
+        np.imag(nn_markers),
+        s=28,
+        marker="o",
+        facecolors="#0f4c81",
+        edgecolors="white",
+        linewidths=0.8,
+        alpha=0.95,
+        zorder=9,
+    )
+    ax.scatter(np.real(z_random), np.imag(z_random), c="#2a9d8f", s=120, marker="X", edgecolors="black", linewidths=0.7, label="Random Point", zorder=10)
+    ax.scatter(np.real(z0), np.imag(z0), c="white", s=90, marker="o", edgecolors="black", linewidths=1.1, label="Start", zorder=10)
+    ax.scatter(np.real(nn_traj[-1]), np.imag(nn_traj[-1]), c="#0f4c81", s=80, marker="s", edgecolors="white", linewidths=0.9, label="NN End", zorder=10)
+    ax.scatter(np.real(base_traj[-1]), np.imag(base_traj[-1]), c="#d95f02", s=82, marker="D", edgecolors="white", linewidths=0.9, label="Newton End", zorder=10)
 
     ax.set_xlabel("Re(z)")
     ax.set_ylabel("Im(z)")
-    ax.set_title(f"NN + ODE vs Newton Predictor-Corrector (epsilon={epsilon:.4g})", loc="left", fontsize=11, pad=20)
+    ax.set_title(
+        f"NN + ODE vs Newton Predictor-Corrector\nmatrix={matrix_type}, epsilon={epsilon:.4g}",
+        loc="left",
+        fontsize=11,
+        pad=18,
+    )
     ax.grid(True, alpha=0.3)
     time_lines = [
         f"NN + ODE: {nn_elapsed:.3f}s",
         f"Newton PC: {baseline_elapsed:.3f}s",
+        f"NN closed: {int(bool(nn_result.get('closed', False)))}",
+        f"Newton closed: {int(bool(baseline_result.get('closed', False)))}",
     ]
     ax.text(
         0.02,
@@ -248,35 +297,18 @@ def main():
 
     with RunLogger(log_root, run_name="benchmark_nn_vs_newton") as run_logger:
         config = load_yaml_config(args.config)
-        device = torch.device(args.device)
-        if device.type == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("请求使用 CUDA，但当前 PyTorch 未检测到可用 GPU。")
 
         run_logger.write_json("run_config.json", {"args": vars(args), "config": config})
         run_logger.log(f"benchmark start log_dir={run_logger.log_dir}")
 
         rng = np.random.default_rng(args.seed)
-        A = generate_random_matrix(args.matrix_size, args.matrix_type, rng).astype(np.complex128)
-        z_random, anchor = sample_random_point(
-            A=A,
-            rng=rng,
-            point_sampler=args.point_sampler,
-            radius_range=tuple(args.radius_range),
-            box_padding=args.box_padding,
-        )
-
         prep_t0 = time.perf_counter()
-        target_epsilon = float(config["ode"]["epsilon"])
-        if args.sample_mode == "trained_epsilon":
-            z0, epsilon = project_to_contour(A, target_epsilon, z_random)
-            epsilon = float(sigma_min_at(A, z0))
-        else:
-            z0 = z_random
-            epsilon = float(sigma_min_at(A, z0))
+        matrix_type, A = build_random_matrix(args.matrix_size, rng)
+        z0, epsilon, z_random, anchor = sample_random_contour_start(A=A, rng=rng)
         epsilon_compute_seconds = float(time.perf_counter() - prep_t0)
 
         run_logger.log(
-            f"prepared instance n={args.matrix_size} type={args.matrix_type} "
+            f"prepared instance n={args.matrix_size} type={matrix_type} "
             f"epsilon={epsilon:.6f} z_random={z_random} z0={z0}"
         )
 
@@ -285,7 +317,7 @@ def main():
             tol=config["solver"]["tol"],
             max_iter=config["solver"]["max_iter"],
         )
-        controller = load_controller(args.checkpoint, config, device=device)
+        controller = load_controller(args.checkpoint, config)
         nn_controller = AdaptiveInferenceController(
             controller,
             min_step_size=float(args.nn_min_step_size if args.nn_min_step_size is not None else config["controller"]["step_size_min"]),
@@ -388,7 +420,6 @@ def main():
         matrix_out = output_dir / "random_matrix.npy"
         plot_out = output_dir / "comparison_plot.png"
         nn_plot_out = output_dir / "nn_only_plot.png"
-        baseline_plot_out = output_dir / "newton_only_plot.png"
         summary_out = output_dir / "comparison_summary.json"
         traj_out = output_dir / "trajectories.npz"
 
@@ -402,6 +433,8 @@ def main():
             A=A,
             epsilon=epsilon,
             z_random=z_random,
+            z0=z0,
+            matrix_type=matrix_type,
             nn_result=nn_result,
             baseline_result=baseline_result,
             nn_elapsed=nn_elapsed,
@@ -418,16 +451,6 @@ def main():
             elapsed_seconds=nn_elapsed,
             save_path=nn_plot_out,
         )
-        save_single_method_plot(
-            A=A,
-            epsilon=epsilon,
-            trajectory=np.asarray(baseline_result["trajectory"], dtype=np.complex128),
-            restart_indices=[],
-            step_sizes=np.asarray(baseline_result.get("step_sizes", []), dtype=np.float64),
-            title=f"Newton Predictor-Corrector Contour (epsilon={epsilon:.4g})",
-            elapsed_seconds=baseline_elapsed,
-            save_path=baseline_plot_out,
-        )
 
         summary = {
             "algorithm": "nn_plus_ode_vs_newton_predictor_corrector",
@@ -435,7 +458,6 @@ def main():
             "matrix_path": str(matrix_out),
             "plot_path": str(plot_out),
             "nn_plot_path": str(nn_plot_out),
-            "baseline_plot_path": str(baseline_plot_out),
             "trajectories_path": str(traj_out),
             "log_dir": str(run_logger.log_dir),
             "run_log_path": str(run_logger.run_log_path),
@@ -444,11 +466,9 @@ def main():
             "nn_diagnostics_path": str(nn_diag_path),
             "baseline_diagnostics_path": str(baseline_diag_path),
             "matrix_size": args.matrix_size,
-            "matrix_type": args.matrix_type,
+            "matrix_type": matrix_type,
             "seed": args.seed,
-            "point_sampler": args.point_sampler,
-            "sample_mode": args.sample_mode,
-            "training_epsilon": float(target_epsilon),
+            "sampling_strategy": "random_point_sigma",
             "restart_threshold": float(args.restart_threshold),
             "epsilon": float(epsilon),
             "epsilon_compute_seconds": epsilon_compute_seconds,

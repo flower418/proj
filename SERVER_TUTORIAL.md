@@ -123,8 +123,7 @@ python scripts/train_from_dataset.py \
     --step-size-max 1e-1 \
     --lambda-step 1.0 \
     --lambda-restart 3.0 \
-    --gradient-clip-norm 1.0 \
-    --device cuda
+    --gradient-clip-norm 1.0
 ```
 
 输出文件：
@@ -141,8 +140,6 @@ python scripts/demo_random_inference.py \
     --checkpoint models/prod1m_model/best_model.pt \
     --matrix-size 50 \
     --seed 0 \
-    --sample-mode point_sigma \
-    --point-sampler around_eigenvalue \
     --output-dir results/nn_demo_seed0
 ```
 
@@ -158,8 +155,6 @@ python scripts/demo_random_inference.py \
 python scripts/run_newton_baseline.py \
     --matrix-size 50 \
     --seed 0 \
-    --sample-mode point_sigma \
-    --point-sampler around_eigenvalue \
     --output-dir results/newton_seed0
 ```
 
@@ -177,18 +172,14 @@ python scripts/benchmark_nn_vs_newton.py \
     --checkpoint models/prod1m_model/best_model.pt \
     --matrix-size 50 \
     --seed 0 \
-    --sample-mode point_sigma \
-    --point-sampler around_eigenvalue \
     --max-steps 16000 \
-    --output-dir results/bench_seed0 \
-    --device cuda
+    --output-dir results/bench_seed0
 ```
 
 输出文件：
 
 - `results/bench_seed0/comparison_plot.png`
 - `results/bench_seed0/nn_only_plot.png`
-- `results/bench_seed0/newton_only_plot.png`
 - `results/bench_seed0/comparison_summary.json`
 - `results/bench_seed0/trajectories.npz`
 - `results/bench_seed0/random_matrix.npy`

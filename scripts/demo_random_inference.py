@@ -15,7 +15,8 @@ from src.core.pseudoinverse import PseudoinverseSolver
 from src.nn.controller import NNController, build_controller_from_checkpoint
 from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.config import load_yaml_config
-from src.utils.contour_init import project_to_contour, sigma_min_at
+from src.utils.contour_init import sigma_min_at
+from src.utils.demo_sampling import build_random_matrix, sample_random_contour_start
 from src.utils.run_logging import StepDiagnosticsCollector, RunLogger, format_nn_step, make_step_callback
 from src.utils.visualization import plot_trajectory
 
@@ -28,41 +29,14 @@ def parse_args():
     parser.add_argument("--checkpoint", required=True, help="Path to the trained controller checkpoint.")
     parser.add_argument("--output-dir", default="results/random_inference", help="Directory for matrix, plot, and summary outputs.")
     parser.add_argument("--matrix-size", type=int, default=20)
-    parser.add_argument("--matrix-type", choices=["complex", "real", "hermitian"], default="complex")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--max-attempts", type=int, default=32, help="Retry with new random matrix/start until a closed contour is found.")
-    parser.add_argument(
-        "--point-sampler",
-        choices=["spectral_box", "around_eigenvalue"],
-        default="spectral_box",
-        help="How to sample the random complex-plane point used to define the contour.",
-    )
-    parser.add_argument(
-        "--sample-mode",
-        choices=["trained_epsilon", "point_sigma"],
-        default="point_sigma",
-        help="trained_epsilon: sample a random direction then project to the config epsilon contour; point_sigma: use epsilon=sigma_min(z0I-A) from a raw random point.",
-    )
     parser.add_argument(
         "--min-step-size",
         type=float,
         default=None,
         help="Optional lower bound applied to controller-predicted step size during demo inference.",
-    )
-    parser.add_argument(
-        "--radius-range",
-        type=float,
-        nargs=2,
-        default=(0.15, 0.35),
-        metavar=("R_MIN", "R_MAX"),
-        help="Only used with --point-sampler around_eigenvalue. Random radius range as a fraction of spectral scale around a random eigenvalue.",
-    )
-    parser.add_argument(
-        "--box-padding",
-        type=float,
-        default=0.25,
-        help="Only used with --point-sampler spectral_box. Padding ratio applied to the eigenvalue bounding box before sampling a random point.",
     )
     parser.add_argument("--print-every", type=int, default=1, help="Print NN decisions every k tracking steps.")
     parser.add_argument("--quiet", action="store_true", help="Disable step-by-step console diagnostics.")
@@ -70,56 +44,6 @@ def parse_args():
     parser.add_argument("--log-dir", default=None, help="Directory for runtime logs. Defaults to <output-dir>/logs.")
     parser.add_argument("--restart-threshold", type=float, default=0.9, help="Controller restart probability threshold during inference.")
     return parser.parse_args()
-
-
-def generate_random_matrix(n: int, matrix_type: str, rng: np.random.Generator) -> np.ndarray:
-    if matrix_type == "complex":
-        return rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
-    if matrix_type == "real":
-        return rng.standard_normal((n, n))
-    if matrix_type == "hermitian":
-        base = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
-        return (base + base.conj().T) / 2.0
-    raise ValueError(f"Unsupported matrix type: {matrix_type}")
-
-
-def choose_point_around_random_eigenvalue(
-    A: np.ndarray,
-    rng: np.random.Generator,
-    radius_range: tuple[float, float],
-) -> tuple[complex, complex]:
-    eigvals = np.linalg.eigvals(np.asarray(A, dtype=np.complex128))
-    anchor = complex(eigvals[int(rng.integers(len(eigvals)))])
-    spectral_scale = max(np.ptp(np.real(eigvals)), np.ptp(np.imag(eigvals)), 1.0)
-    r_min, r_max = radius_range
-    if not (0.0 < r_min < r_max):
-        raise ValueError("radius_range must satisfy 0 < R_MIN < R_MAX.")
-    radius = rng.uniform(r_min, r_max) * spectral_scale
-    angle = rng.uniform(0.0, 2.0 * np.pi)
-    z0 = anchor + radius * np.exp(1j * angle)
-    return z0, anchor
-
-
-def choose_point_in_spectral_box(
-    A: np.ndarray,
-    rng: np.random.Generator,
-    padding: float,
-) -> tuple[complex, complex]:
-    eigvals = np.linalg.eigvals(np.asarray(A, dtype=np.complex128))
-    x_min = float(np.min(np.real(eigvals)))
-    x_max = float(np.max(np.real(eigvals)))
-    y_min = float(np.min(np.imag(eigvals)))
-    y_max = float(np.max(np.imag(eigvals)))
-    x_span = max(x_max - x_min, 1.0)
-    y_span = max(y_max - y_min, 1.0)
-    x_pad = max(float(padding), 0.0) * x_span
-    y_pad = max(float(padding), 0.0) * y_span
-    z_random = complex(
-        rng.uniform(x_min - x_pad, x_max + x_pad),
-        rng.uniform(y_min - y_pad, y_max + y_pad),
-    )
-    nearest = complex(eigvals[int(np.argmin(np.abs(eigvals - z_random)))])
-    return z_random, nearest
 
 
 def load_controller(checkpoint_path: str, config: dict) -> NNController:
@@ -196,30 +120,21 @@ def main():
             max_step_size=config["controller"].get("step_size_max"),
             restart_threshold=float(args.restart_threshold),
         )
-        target_epsilon = float(config["ode"]["epsilon"])
         base_step_budget = int(args.max_steps if args.max_steps is not None else config["tracker"]["max_steps"])
         budget_multipliers = [1, 2, 4, 8]
 
         best_attempt = None
         for attempt_idx in range(args.max_attempts):
-            A = generate_random_matrix(args.matrix_size, args.matrix_type, rng).astype(np.complex128)
-            if args.point_sampler == "spectral_box":
-                z_random, anchor = choose_point_in_spectral_box(A, rng, padding=args.box_padding)
-            else:
-                z_random, anchor = choose_point_around_random_eigenvalue(A, rng, tuple(args.radius_range))
+            matrix_type, A = build_random_matrix(args.matrix_size, rng)
             try:
-                if args.sample_mode == "trained_epsilon":
-                    z0, epsilon = project_to_contour(A, target_epsilon, z_random)
-                    epsilon = float(sigma_min_at(A, z0))
-                else:
-                    z0 = z_random
-                    epsilon = float(sigma_min_at(A, z0))
-            except ValueError:
-                run_logger.log(f"attempt={attempt_idx + 1}/{args.max_attempts} projection failed, resampling")
+                z0, epsilon, z_random, anchor = sample_random_contour_start(A=A, rng=rng)
+            except Exception:
+                run_logger.log(f"attempt={attempt_idx + 1}/{args.max_attempts} random start failed, resampling")
                 continue
 
             run_logger.log(
                 f"attempt={attempt_idx + 1}/{args.max_attempts} "
+                f"matrix_type={matrix_type} "
                 f"epsilon={epsilon:.6f} random_point={_format_complex(z_random)} "
                 f"start_point={_format_complex(z0)} nearest_eig={_format_complex(anchor)}"
             )
@@ -282,6 +197,7 @@ def main():
                     "attempt_index": attempt_idx,
                     "step_budget": step_budget,
                     "A": A,
+                    "matrix_type": matrix_type,
                     "z0": z0,
                     "z_random": z_random,
                     "anchor": anchor,
@@ -351,6 +267,7 @@ def main():
                 )
 
         A = best_attempt["A"]
+        matrix_type = str(best_attempt["matrix_type"])
         z0 = best_attempt["z0"]
         z_random = best_attempt["z_random"]
         anchor = best_attempt["anchor"]
@@ -381,10 +298,9 @@ def main():
             "attempt_log_path": str(run_logger.log_dir / "attempts.jsonl"),
             "diagnostics_path": str(diagnostics_path),
             "matrix_size": args.matrix_size,
-            "matrix_type": args.matrix_type,
+            "matrix_type": matrix_type,
             "seed": args.seed,
-            "point_sampler": args.point_sampler,
-            "sample_mode": args.sample_mode,
+            "sampling_strategy": "random_point_sigma",
             "attempt_index": int(best_attempt["attempt_index"]),
             "max_attempts": int(args.max_attempts),
             "step_budget_used": int(best_attempt["step_budget"]),
