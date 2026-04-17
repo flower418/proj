@@ -24,7 +24,6 @@ class ExpertStepResult:
     residual: float
     sigma_error: float
     gamma: float
-    backtracks: int = 0
     applied_projection: bool = False
     suggested_next_step: float = 0.0
 
@@ -45,12 +44,9 @@ class ExpertSolver:
         min_winding_angle: float = 1.5 * np.pi,
         projection_tol: float = 1e-8,
         min_step_size: float = 1e-6,
-        max_backtracks: int = 8,
         proposal_growth: float = 1.6,
         nominal_growth: float = 1.2,
         projection_growth: float = 1.05,
-        mild_backtrack_shrink: float = 0.9,
-        strong_backtrack_shrink: float = 0.7,
         solver: Optional[PseudoinverseSolver] = None,
         svd_solver=None,
     ):
@@ -66,12 +62,9 @@ class ExpertSolver:
         self.min_winding_angle = float(min_winding_angle)
         self.projection_tol = float(projection_tol)
         self.min_step_size = float(min_step_size)
-        self.max_backtracks = int(max_backtracks)
         self.proposal_growth = float(proposal_growth)
         self.nominal_growth = float(nominal_growth)
         self.projection_growth = float(projection_growth)
-        self.mild_backtrack_shrink = float(mild_backtrack_shrink)
-        self.strong_backtrack_shrink = float(strong_backtrack_shrink)
         self.svd_solver = svd_solver or smallest_singular_triplet
         self.linear_solver = solver or PseudoinverseSolver()
         self.ode = ManifoldODE(self.A, self.epsilon, solver=self.linear_solver)
@@ -128,12 +121,10 @@ class ExpertSolver:
     def _project_to_contour_locally(
         self,
         z_candidate: complex,
-        search_radius: float,
         sigma_candidate: float | None = None,
         u_candidate: np.ndarray | None = None,
         v_candidate: np.ndarray | None = None,
     ) -> tuple[complex, np.ndarray, np.ndarray, dict] | None:
-        del search_radius
         return project_to_contour_by_local_normal(
             A=self.A,
             epsilon=self.epsilon,
@@ -152,76 +143,69 @@ class ExpertSolver:
         v: np.ndarray,
         ds: float,
     ) -> tuple[complex, np.ndarray, np.ndarray, float, dict]:
-        ds_try = float(np.clip(ds, self.min_step_size, self.max_step))
+        ds_step = float(np.clip(ds, self.min_step_size, self.max_step))
 
-        for backtrack_idx in range(self.max_backtracks + 1):
-            z_candidate, _, _ = rk4_triplet_step(
-                self.ode.get_full_derivatives,
-                z,
-                u,
-                v,
-                ds_try,
-            )
-            sigma_candidate, u_exact, v_exact = self.svd_solver(self.A, z_candidate)
-            u_exact = u_exact / max(np.linalg.norm(u_exact), 1e-15)
-            v_exact = v_exact / max(np.linalg.norm(v_exact), 1e-15)
-            sigma_error = abs(float(sigma_candidate) - self.epsilon)
+        z_candidate, _, _ = rk4_triplet_step(
+            self.ode.get_full_derivatives,
+            z,
+            u,
+            v,
+            ds_step,
+        )
+        sigma_candidate, u_exact, v_exact = self.svd_solver(self.A, z_candidate)
+        sigma_candidate = float(sigma_candidate)
+        u_exact = u_exact / max(np.linalg.norm(u_exact), 1e-15)
+        v_exact = v_exact / max(np.linalg.norm(v_exact), 1e-15)
+        sigma_error = abs(sigma_candidate - self.epsilon)
 
-            if sigma_error <= max(self.projection_tol, 1e-10):
-                return z_candidate, u_exact, v_exact, ds_try, {
-                    "backtracks": backtrack_idx,
-                    "applied_projection": False,
-                    "sigma": float(sigma_candidate),
-                    "sigma_error": float(sigma_error),
-                    "projection_distance": 0.0,
-                    "projection_expansions": 0,
-                    "projection_mode": "none",
+        if sigma_error <= max(self.projection_tol, 1e-10):
+            return z_candidate, u_exact, v_exact, ds_step, {
+                'applied_projection': False,
+                'sigma': float(sigma_candidate),
+                'sigma_error': float(sigma_error),
+                'projection_distance': 0.0,
+                'projection_iterations': 0,
+                'projection_mode': 'none',
+            }
+
+        local_projection = self._project_to_contour_locally(
+            z_candidate,
+            sigma_candidate=float(sigma_candidate),
+            u_candidate=u_exact,
+            v_candidate=v_exact,
+        )
+        if local_projection is not None:
+            z_projected, u_projected, v_projected, projection_info = local_projection
+            if projection_info['sigma_error'] <= max(self.projection_tol, 1e-8):
+                return z_projected, u_projected, v_projected, ds_step, {
+                    'applied_projection': True,
+                    **projection_info,
                 }
 
-            local_projection = self._project_to_contour_locally(
+        try:
+            z_projected, sigma_projected = project_to_contour(
+                self.A,
+                self.epsilon,
                 z_candidate,
-                search_radius=ds_try,
-                sigma_candidate=float(sigma_candidate),
-                u_candidate=u_exact,
-                v_candidate=v_exact,
+                tol=min(self.projection_tol, 1e-6),
             )
-            if local_projection is not None:
-                z_projected, u_projected, v_projected, projection_info = local_projection
-                if projection_info["sigma_error"] <= max(self.projection_tol, 1e-8):
-                    return z_projected, u_projected, v_projected, ds_try, {
-                        "backtracks": backtrack_idx,
-                        "applied_projection": True,
-                        **projection_info,
-                    }
+        except ValueError as exc:
+            raise RuntimeError('Unable to advance a teacher step while remaining on the epsilon contour.') from exc
 
-            try:
-                z_projected, sigma_projected = project_to_contour(
-                    self.A,
-                    self.epsilon,
-                    z_candidate,
-                    tol=min(self.projection_tol, 1e-6),
-                )
-            except ValueError:
-                z_projected, sigma_projected = None, None
-            if z_projected is not None and abs(float(sigma_projected) - self.epsilon) <= max(self.projection_tol, 1e-8):
-                _, u_projected, v_projected = self.svd_solver(self.A, z_projected)
-                u_projected = u_projected / max(np.linalg.norm(u_projected), 1e-15)
-                v_projected = v_projected / max(np.linalg.norm(v_projected), 1e-15)
-                return z_projected, u_projected, v_projected, ds_try, {
-                    "backtracks": backtrack_idx,
-                    "applied_projection": True,
-                    "sigma": float(sigma_projected),
-                    "sigma_error": float(abs(float(sigma_projected) - self.epsilon)),
-                    "projection_distance": float(abs(z_projected - z_candidate)),
-                    "projection_expansions": 0,
-                    "projection_mode": "radial_fallback",
-                }
+        if abs(float(sigma_projected) - self.epsilon) > max(self.projection_tol, 1e-8):
+            raise RuntimeError('Unable to advance a teacher step while remaining on the epsilon contour.')
 
-            if ds_try <= self.min_step_size * (1.0 + 1e-12):
-                break
-            ds_try = max(0.5 * ds_try, self.min_step_size)
-
-        raise RuntimeError("Unable to advance a teacher step while remaining on the epsilon contour.")
+        _, u_projected, v_projected = self.svd_solver(self.A, z_projected)
+        u_projected = u_projected / max(np.linalg.norm(u_projected), 1e-15)
+        v_projected = v_projected / max(np.linalg.norm(v_projected), 1e-15)
+        return z_projected, u_projected, v_projected, ds_step, {
+            'applied_projection': True,
+            'sigma': float(sigma_projected),
+            'sigma_error': float(abs(float(sigma_projected) - self.epsilon)),
+            'projection_distance': float(abs(z_projected - z_candidate)),
+            'projection_iterations': 0,
+            'projection_mode': 'radial_fallback',
+        }
 
     def _propose_trial_step(self, step_hint: Optional[float]) -> float:
         if step_hint is None:
@@ -229,13 +213,9 @@ class ExpertSolver:
         base_step = max(float(step_hint), self.min_step_size)
         return float(np.clip(max(base_step * self.proposal_growth, self.first_step), self.min_step_size, self.max_step))
 
-    def _adapt_next_step_size(self, current_step_size: float, backtracks: int, applied_projection: bool) -> float:
+    def _adapt_next_step_size(self, current_step_size: float, applied_projection: bool) -> float:
         next_step = float(current_step_size)
-        if backtracks >= 2:
-            next_step *= self.strong_backtrack_shrink
-        elif backtracks == 1:
-            next_step *= self.mild_backtrack_shrink
-        elif applied_projection:
+        if applied_projection:
             next_step *= self.projection_growth
         else:
             next_step *= self.nominal_growth
@@ -278,6 +258,7 @@ class ExpertSolver:
                 ds=retry_step,
             )
 
+        applied_projection = bool(step_info['applied_projection'])
         return ExpertStepResult(
             z_next=z_next,
             u_next=u_next,
@@ -286,12 +267,10 @@ class ExpertSolver:
             residual=residual,
             sigma_error=sigma_error,
             gamma=gamma,
-            backtracks=int(step_info["backtracks"]),
-            applied_projection=bool(step_info["applied_projection"]),
+            applied_projection=applied_projection,
             suggested_next_step=self._adapt_next_step_size(
                 current_step_size=float(ds_expert),
-                backtracks=int(step_info["backtracks"]),
-                applied_projection=bool(step_info["applied_projection"]),
+                applied_projection=applied_projection,
             ),
         )
 
@@ -343,27 +322,26 @@ class ExpertSolver:
             )
 
             record = {
-                "z": z_prev,
-                "u": u.copy(),
-                "v": v.copy(),
-                "z_next": result.z_next,
-                "u_next": result.u_next.copy(),
-                "v_next": result.v_next.copy(),
-                "ds_expert": result.ds_expert,
-                "residual": result.residual,
-                "sigma_error": result.sigma_error,
-                "gamma": result.gamma,
-                "step": step_idx,
-                "prev_ds": float(prev_ds),
-                "prev_applied_projection": bool(prev_applied_projection),
-                "elapsed_seconds": elapsed_seconds,
-                "backtracks": result.backtracks,
-                "applied_projection": result.applied_projection,
-                "step_distance": step_distance,
-                "path_length": float(path_length),
-                "max_distance_from_start": float(max_distance_from_start),
-                "winding_angle": float(winding_angle),
-                "closed": bool(closed),
+                'z': z_prev,
+                'u': u.copy(),
+                'v': v.copy(),
+                'z_next': result.z_next,
+                'u_next': result.u_next.copy(),
+                'v_next': result.v_next.copy(),
+                'ds_expert': result.ds_expert,
+                'residual': result.residual,
+                'sigma_error': result.sigma_error,
+                'gamma': result.gamma,
+                'step': step_idx,
+                'prev_ds': float(prev_ds),
+                'prev_applied_projection': bool(prev_applied_projection),
+                'elapsed_seconds': elapsed_seconds,
+                'applied_projection': result.applied_projection,
+                'step_distance': step_distance,
+                'path_length': float(path_length),
+                'max_distance_from_start': float(max_distance_from_start),
+                'winding_angle': float(winding_angle),
+                'closed': bool(closed),
             }
             trajectory.append(record)
             if step_callback is not None:

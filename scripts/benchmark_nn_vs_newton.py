@@ -13,9 +13,7 @@ import torch
 import _bootstrap  # noqa: F401
 
 from src.baselines import NewtonPredictorCorrectorTracker
-from src.core.contour_tracker import FAST_TANGENT_TRACKER_KWARGS, ContourTracker
-from src.core.manifold_ode import ManifoldODE
-from src.core.pseudoinverse import PseudoinverseSolver
+from src.core.contour_tracker import ContourTracker
 from src.nn.controller import NNController, build_controller_from_checkpoint
 from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.config import load_yaml_config
@@ -99,11 +97,6 @@ def run_nn_benchmark(
     nn_min_step_size: float | None,
     summary_path: Path,
 ) -> dict:
-    solver = PseudoinverseSolver(
-        method=config["solver"]["method"],
-        tol=config["solver"]["tol"],
-        max_iter=config["solver"]["max_iter"],
-    )
     controller = load_controller(checkpoint, config)
     nn_controller = AdaptiveInferenceController(
         controller,
@@ -114,12 +107,10 @@ def run_nn_benchmark(
     tracker = ContourTracker(
         A=A,
         epsilon=epsilon,
-        ode_system=ManifoldODE(A, epsilon=epsilon, solver=solver),
         controller=nn_controller,
         fixed_step_size=config["ode"]["initial_step_size"],
         closure_tol=config["tracker"]["closure_tol"],
         min_step_size=config["ode"]["min_step_size"],
-        **FAST_TANGENT_TRACKER_KWARGS,
     )
     step_callback = make_console_callback(format_nn_step, label="nn", print_every=20)
     t0 = time.perf_counter()
@@ -180,7 +171,6 @@ def run_newton_benchmark(
             "total_time_seconds": elapsed,
             "mean_corrector_iterations": float(result.get("mean_corrector_iterations", 0.0)),
             "mean_predictor_halvings": float(result.get("mean_predictor_halvings", 0.0)),
-            "mean_line_search_backtracks": float(result.get("mean_line_search_backtracks", 0.0)),
             "failure_reason": result.get("failure_reason"),
         }
     )

@@ -47,7 +47,7 @@ class AdaptiveInferenceController:
         self.curvature_turn_threshold = max(float(curvature_turn_threshold), 0.0)
         self.curvature_penalty_streak = max(int(curvature_penalty_streak), 1)
         self.curvature_shrink_factor = min(max(float(curvature_shrink_factor), 0.1), 0.99)
-        self.input_dim = int(getattr(base_controller, "input_dim", 8))
+        self.input_dim = int(getattr(base_controller, 'input_dim', 8))
         self.reset()
 
     def reset(self) -> None:
@@ -71,7 +71,7 @@ class AdaptiveInferenceController:
         return ds
 
     def predict_with_info(self, state_np) -> tuple[float, dict[str, Any]]:
-        if hasattr(self.base_controller, "predict_with_info"):
+        if hasattr(self.base_controller, 'predict_with_info'):
             ds, info = self.base_controller.predict_with_info(state_np)
         else:
             ds = self.base_controller.predict(state_np)
@@ -88,23 +88,23 @@ class AdaptiveInferenceController:
 
         info.update(
             {
-                "stable_steps": int(self._stable_steps),
-                "projection_streak": int(self._projection_streak),
-                "projection_free_steps": int(self._projection_free_steps),
-                "adaptive_growth_multiplier": float(growth_multiplier),
-                "min_step_size_applied": self.min_step_size,
-                "max_step_size_applied": self.max_step_size,
-                "dynamic_step_ceiling": self._dynamic_step_ceiling,
+                'stable_steps': int(self._stable_steps),
+                'projection_streak': int(self._projection_streak),
+                'projection_free_steps': int(self._projection_free_steps),
+                'adaptive_growth_multiplier': float(growth_multiplier),
+                'min_step_size_applied': self.min_step_size,
+                'max_step_size_applied': self.max_step_size,
+                'dynamic_step_ceiling': self._dynamic_step_ceiling,
             }
         )
         return ds_value, info
 
     def observe_step(self, info: dict[str, Any]) -> None:
-        applied_projection = bool(info.get("applied_projection", False))
-        raw_sigma_error = float(info.get("raw_sigma_error", info.get("sigma_error", 0.0)))
-        ds = max(float(info.get("ds", 0.0)), self.min_step_size)
-        projection_distance = float(info.get("projection_distance", 0.0))
-        tangent_turn = float(info.get("tangent_turn", 0.0))
+        applied_projection = bool(info.get('applied_projection', False))
+        raw_sigma_error = float(info.get('raw_sigma_error', info.get('sigma_error', 0.0)))
+        ds = max(float(info.get('ds', 0.0)), self.min_step_size)
+        projection_distance = float(info.get('projection_distance', 0.0))
+        tangent_turn = float(info.get('tangent_turn', 0.0))
         projection_distance_ratio = projection_distance / max(ds, 1e-12)
         severe_projection = bool(
             applied_projection
@@ -148,9 +148,5 @@ class AdaptiveInferenceController:
         else:
             self._curvature_streak = 0
 
-        is_stable = (
-            not applied_projection
-            and int(info.get("backtracks", 0)) == 0
-            and raw_sigma_error <= self.stable_sigma_error
-        )
+        is_stable = (not applied_projection) and raw_sigma_error <= self.stable_sigma_error
         self._stable_steps = self._stable_steps + 1 if is_stable else 0

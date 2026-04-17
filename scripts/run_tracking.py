@@ -9,9 +9,7 @@ import torch
 
 import _bootstrap  # noqa: F401
 
-from src.core.contour_tracker import FAST_TANGENT_TRACKER_KWARGS, ContourTracker
-from src.core.manifold_ode import ManifoldODE
-from src.core.pseudoinverse import PseudoinverseSolver
+from src.core.contour_tracker import ContourTracker
 from src.nn.controller import build_controller_from_checkpoint
 from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.config import load_yaml_config
@@ -115,11 +113,6 @@ def main():
             f"matrix_shape={A.shape} log_dir={run_logger.log_dir}"
         )
 
-        solver = PseudoinverseSolver(
-            method=config["solver"]["method"],
-            tol=config["solver"]["tol"],
-            max_iter=config["solver"]["max_iter"],
-        )
         controller = None
         if args.checkpoint is not None:
             checkpoint = torch.load(args.checkpoint, map_location="cpu")
@@ -145,15 +138,12 @@ def main():
             print_every=0 if args.quiet else max(args.print_every, 1),
         )
 
-        ode = ManifoldODE(A, epsilon=epsilon, solver=solver)
         tracker = ContourTracker(
             A=A,
             epsilon=epsilon,
-            ode_system=ode,
             controller=controller,
             fixed_step_size=config["ode"]["initial_step_size"],
             closure_tol=config["tracker"]["closure_tol"],
-            **FAST_TANGENT_TRACKER_KWARGS,
         )
         result = tracker.track(z0=z0, max_steps=max_steps, step_callback=step_callback)
         diagnostics = collector.summary()

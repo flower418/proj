@@ -10,7 +10,6 @@ import numpy as np
 import _bootstrap  # noqa: F401
 
 from src.core.contour_tracker import ContourTracker
-from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.nn.features import assemble_controller_features, extract_features
 from src.train.dagger_augmentation import DAggerAugmenter
@@ -36,13 +35,11 @@ def generate_trajectory(
     tracker = ContourTracker(
         A=A,
         epsilon=epsilon,
-        ode_system=ManifoldODE(A, epsilon=epsilon, solver=solver),
         controller=None,
         fixed_step_size=expert.first_step,
         closure_tol=expert.closure_tol,
         projection_tol=expert.projection_tol,
         min_step_size=expert.min_step_size,
-        max_backtracks=expert.max_backtracks,
     )
 
     u, v = tracker.initialize(z0)
@@ -86,7 +83,7 @@ def generate_trajectory(
             "prev_applied_projection": bool(prev_applied_projection),
         }
 
-        z_next, u_next, v_next, _, step_info = tracker._advance_with_backtracking(
+        z_next, u_next, v_next, _, step_info = tracker._advance_step(
             z=z,
             u=u,
             v=v,

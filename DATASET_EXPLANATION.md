@@ -14,7 +14,15 @@
 ## 1. 生成命令
 
 ```bash
-python -u scripts/generate_large_dataset.py     --target-samples 100000     --matrix-sizes 30 50 80 100     --trajectories-per-type 5     --max-steps 200     --dagger-factor 2     --output-dir data/prod100k     --save-every 10000     --seed 0
+python -u scripts/generate_large_dataset.py \
+    --target-samples 100000 \
+    --matrix-sizes 30 50 80 100 \
+    --trajectories-per-type 5 \
+    --max-steps 200 \
+    --dagger-factor 2 \
+    --output-dir data/prod100k \
+    --save-every 10000 \
+    --seed 0
 ```
 
 当前 CLI 参数：
@@ -94,7 +102,24 @@ python -u scripts/generate_large_dataset.py     --target-samples 100000     --ma
 
 ---
 
-## 6. 划分方式
+## 6. 专家与 teacher-forced 轨迹
+
+当前数据生成分两层：
+
+1. **专家层**
+   - `ExpertSolver` 用 full triplet RK4 推进 `(z,u,v)`
+   - 对候选点做局部投影或全局投影
+   - 输出 `ds_expert`
+
+2. **teacher-forced tracker 层**
+   - `ContourTracker` 用和推理一致的 tangent tracker 执行这一步 `ds_expert`
+   - 记录真实 rollout 分布下的 `(features, ds_expert)`
+
+这样生成的数据更接近真实推理分布，而不是只来自理想化专家状态。
+
+---
+
+## 7. 划分方式
 
 脚本会写出：
 
@@ -105,7 +130,7 @@ python -u scripts/generate_large_dataset.py     --target-samples 100000     --ma
 
 ---
 
-## 7. 输出文件
+## 8. 输出文件
 
 完整生成后通常会看到：
 
@@ -124,7 +149,7 @@ python -u scripts/generate_large_dataset.py     --target-samples 100000     --ma
 
 ---
 
-## 8. 检查数据
+## 9. 检查数据
 
 ```bash
 python src/data/dataset.py --data-dir data/prod100k

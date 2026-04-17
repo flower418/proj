@@ -17,7 +17,7 @@ class NewtonCorrectorResult:
     v: np.ndarray
     sigma: float
     iterations: int
-    line_search_backtracks: int
+    line_search_shrinks: int
     converged: bool
 
 
@@ -34,7 +34,7 @@ class NewtonPredictorCorrectorTracker:
         corrector_tol: float = 1e-10,
         max_corrector_iters: int = 8,
         max_step_halvings: int = 8,
-        max_line_search_backtracks: int = 8,
+        max_line_search_shrinks: int = 8,
         closure_tol: float = 1e-3,
         min_steps_before_closure: int = 32,
         min_winding_angle: float = 1.5 * np.pi,
@@ -50,7 +50,7 @@ class NewtonPredictorCorrectorTracker:
         self.corrector_tol = float(corrector_tol)
         self.max_corrector_iters = int(max_corrector_iters)
         self.max_step_halvings = int(max_step_halvings)
-        self.max_line_search_backtracks = int(max_line_search_backtracks)
+        self.max_line_search_shrinks = int(max_line_search_shrinks)
         self.closure_tol = float(closure_tol)
         self.min_steps_before_closure = int(min_steps_before_closure)
         self.min_winding_angle = float(min_winding_angle)
@@ -114,7 +114,7 @@ class NewtonPredictorCorrectorTracker:
         z_pred: complex,
     ) -> NewtonCorrectorResult:
         z_current = complex(z_pred)
-        total_line_search_backtracks = 0
+        total_line_search_shrinks = 0
 
         sigma, u, v = self.svd_solver(self.A, z_current)
         u = u / max(np.linalg.norm(u), 1e-15)
@@ -129,7 +129,7 @@ class NewtonPredictorCorrectorTracker:
                     v=v,
                     sigma=float(sigma),
                     iterations=iteration,
-                    line_search_backtracks=total_line_search_backtracks,
+                    line_search_shrinks=total_line_search_shrinks,
                     converged=True,
                 )
 
@@ -142,7 +142,7 @@ class NewtonPredictorCorrectorTracker:
 
             accepted = False
             damping = 1.0
-            for backtrack_idx in range(self.max_line_search_backtracks + 1):
+            for shrink_idx in range(self.max_line_search_shrinks + 1):
                 z_trial = z_current - damping * alpha * normal
                 sigma_trial, u_trial, v_trial = self.svd_solver(self.A, z_trial)
                 if abs(sigma_trial - self.epsilon) < abs(sigma_error):
@@ -150,7 +150,7 @@ class NewtonPredictorCorrectorTracker:
                     sigma = float(sigma_trial)
                     u = u_trial / max(np.linalg.norm(u_trial), 1e-15)
                     v = v_trial / max(np.linalg.norm(v_trial), 1e-15)
-                    total_line_search_backtracks += backtrack_idx
+                    total_line_search_shrinks += shrink_idx
                     accepted = True
                     break
                 damping *= 0.5
@@ -164,7 +164,7 @@ class NewtonPredictorCorrectorTracker:
             v=v,
             sigma=float(sigma),
             iterations=self.max_corrector_iters,
-            line_search_backtracks=total_line_search_backtracks,
+            line_search_shrinks=total_line_search_shrinks,
             converged=abs(float(sigma) - self.epsilon) <= self.corrector_tol,
         )
 
@@ -193,7 +193,7 @@ class NewtonPredictorCorrectorTracker:
         sigma_errors = [float(abs(sigma_at_start - self.epsilon))]
         corrector_iterations = []
         predictor_halvings = []
-        line_search_backtracks = []
+        line_search_shrinks = []
         path_length = 0.0
         max_distance_from_start = 0.0
         closure_anchor = self._closure_anchor(z0)
@@ -250,7 +250,7 @@ class NewtonPredictorCorrectorTracker:
             sigma_errors.append(float(abs(accepted.sigma - self.epsilon)))
             corrector_iterations.append(int(accepted.iterations))
             predictor_halvings.append(int(accepted_halvings))
-            line_search_backtracks.append(int(accepted.line_search_backtracks))
+            line_search_shrinks.append(int(accepted.line_search_shrinks))
 
             if step_callback is not None:
                 step_callback(
@@ -266,10 +266,9 @@ class NewtonPredictorCorrectorTracker:
                         "winding_angle": float(winding_angle),
                         "sigma": float(accepted.sigma),
                         "sigma_error": float(abs(accepted.sigma - self.epsilon)),
-                        "backtracks": int(accepted_halvings),
                         "predictor_halvings": int(accepted_halvings),
                         "corrector_iterations": int(accepted.iterations),
-                        "line_search_backtracks": int(accepted.line_search_backtracks),
+                        "line_search_shrinks": int(accepted.line_search_shrinks),
                     }
                 )
 
@@ -299,7 +298,7 @@ class NewtonPredictorCorrectorTracker:
             "sigma_errors": sigma_errors,
             "corrector_iterations": corrector_iterations,
             "predictor_halvings": predictor_halvings,
-            "line_search_backtracks": line_search_backtracks,
+            "line_search_shrinks": line_search_shrinks,
             "projection_indices": [],
             "closed": bool(closed),
             "path_length": float(path_length),
@@ -310,6 +309,6 @@ class NewtonPredictorCorrectorTracker:
             "failure_reason": failure_reason,
             "final_step_size": float(step_size),
             "mean_corrector_iterations": float(np.mean(corrector_iterations)) if corrector_iterations else 0.0,
-            "mean_line_search_backtracks": float(np.mean(line_search_backtracks)) if line_search_backtracks else 0.0,
+            "mean_line_search_shrinks": float(np.mean(line_search_shrinks)) if line_search_shrinks else 0.0,
             "mean_predictor_halvings": float(np.mean(predictor_halvings)) if predictor_halvings else 0.0,
         }
