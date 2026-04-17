@@ -1,245 +1,383 @@
-# 动机
+# 组会说明稿
 
-* 传统算法（如牛顿预估矫正）每走一步都需要计算 $\sigma,u,v$，开销较大，于是可以利用子空间的一些性质，将 SVD 进行微分传播
-    * 只需要已知点的 $(z,u,v)$，就能列出随弧长 $s$ 变化的微分方程
-    * 在更新 $z$ 的同时，$(u,v)$ 可以通过微分进行传播
-    * 积分 ODE 只需要 $O(n^2)$
-* 纯 ODE 在进行多步后会产生数值漂移，需要进行一次 SVD “重启”，传统做法要人工设定在什么条件下进行 SVD，会导致大量不必要的 SVD，可以引入 NN 来优化这一问题
-    * 训练一个轻量级的网络
-    * 输入：当前的局部几何特征
-    * 输出：
-        * 最优的步长 $ds$：在平缓区域 $ds$ 较大，在尖端区域 $ds$ 较小
-        * 是否需要重启：判断线性近似是否已经误差过大，必须做一次 SVD
+## 1. 这个项目想解决什么问题
 
+目标是追踪矩阵 `A` 的 `epsilon`-伪谱等高线，也就是在复平面里沿着
+`sigma_min(zI-A)=epsilon` 这条曲线走一圈。
 
+如果完全用传统数值方法，每走一步都要频繁做精确 SVD 或牛顿校正，代价很高。
+所以这个项目的核心想法不是“让神经网络直接画整条轮廓”，而是：
 
-# 推导
+- 用白盒几何/ODE 给出正确的局部运动方向
+- 用神经网络只学习控制策略
+- 具体来说，网络只负责两个决策：
+  - 这一步走多大，也就是步长 `ds`
+  - 这一步是否值得做一次精确重启
 
-## 1.问题设定与基础约束
+所以它本质上是一个“神经网络控制器 + 白盒追踪器”的混合方法。
 
-给定大矩阵 $A \in \mathbb{C}^{n \times n}$，定义含参矩阵 $M(z) = zI - A$。对于伪谱水平 $\epsilon > 0$，等高线 $\Lambda_\epsilon(A)$ 上的任意一点 $z$，其最小奇异值满足 $\sigma(z) = \epsilon$。
+## 2. 整体流程
 
-设 $(\sigma, u, v)$ 为 $M(z)$ 的最小奇异三元组，它们必须满足以下基本定义：
-$$
-M(z)v = \sigma u \quad \text{(1a)} 
-$$
-$$
-M(z)^*u = \sigma v \quad \text{(1b)} 
-$$
-同时，左、右奇异向量满足正交归一化约束：
-$$
-u^*u = 1, \quad v^*v = 1 \quad \text{(2)} 
-$$
+当前主线流程很简单：
 
-假设 $z(s) = x(s) + i y(s)$ 是沿着伪谱等高线参数化的目标曲线，其中 $s$ 为弧长参数。我们定义对弧长 $s$ 的导数为 $\dot{(\cdot)} = \frac{d}{ds}$。由于等高线上奇异值恒定，我们有首要约束条件：
-$$
-\dot{\sigma} = 0 \quad \text{(3)} 
-$$
+1. 随机生成矩阵和起点，做离线数据集
+2. 用专家策略给每个状态打标签：`ds_expert` 和 `y_restart`
+3. 训练一个轻量级 MLP 控制器
+4. 推理时用网络给出局部控制信号，再交给追踪器执行
+5. 用 Newton predictor-corrector 作为传统 baseline 对比
 
-## 2.预测轨线：等高线切向的严谨推导
+当前实际用到的主线脚本是：
 
-为了追踪等高线，我们需要首先确定复平面上的移动方向 $\dot{z} = \frac{dz}{ds}$。
+- `scripts/generate_large_dataset.py`
+- `scripts/train_from_dataset.py`
+- `scripts/run_tracking.py`
+- `scripts/benchmark_nn_vs_newton.py`
 
-由于 $\frac{dM}{ds} = \dot{z}I$ 且 $\frac{dM^*}{ds} = \bar{\dot{z}}I$，我们对式 (1a) 和 (1b) 两边同时对 $s$ 求导，并代入 $\dot{\sigma} = 0$ 得到：
-$$
-\dot{z}v + M\dot{v} = \sigma\dot{u} \quad \text{(4a)} 
-$$
-$$
-\bar{\dot{z}}u + M^*\dot{u} = \sigma\dot{v} \quad \text{(4b)} 
-$$
+## 3. 数据集是怎么生成的
 
-为了解出 $\dot{z}$，我们在式 (4a) 两侧左乘 $u^*$：
-$$
-u^*(\dot{z}v) + u^*M\dot{v} = \sigma u^*\dot{u} 
-$$
-利用关系 $u^*M = \sigma v^*$（由 1b 的共轭转置得到），上式化简为：
-$$
-\dot{z}(u^*v) + \sigma v^*\dot{v} = \sigma u^*\dot{u} \quad \text{(5)} 
-$$
+### 3.1 随机任务怎么定义
 
-**引入规范条件 (Gauge Condition)：** 
-在复奇异值分解中，奇异向量存在一个纯相位的自由度（即乘以 $e^{i\theta}$ 依然满足定义）。为了在连续演化中固定这一自由度，确保数值稳定性，我们引入最小相位变化规范条件：
-$$
-\text{Re}(v^*\dot{v}) = 0 \quad \text{和} \quad \text{Re}(u^*\dot{u}) = 0 \quad \text{(6)} 
-$$
-对式 (5) 两边取实部，并应用该规范条件，立即可得：
-$$
-\text{Re}(\dot{z} u^*v) = 0 \quad \text{(7)} 
-$$
+每个训练任务都不是手工给 `epsilon`，而是这样定义的：
 
-**切向方程的几何意义：**
-令复数量 $\gamma = u^*v$（这实质上代表了 $\sigma(z)$ 在复平面上的复梯度）。式 (7) 表明，我们的运动方向 $\dot{z}$ 必须与梯度 $\gamma$ 在复平面上正交。为了保证单位弧长推进（$|\dot{z}|=1$），我们对梯度旋转 $90^\circ$ （乘以虚数单位 $i$）并归一化，得到等高线的完美切向方程：
-$$
-\frac{dz}{ds} = i \frac{\bar{\gamma}}{|\gamma|} = i \frac{v^*u}{|v^*u|} \quad \text{(8)} 
-$$
+1. 随机抽一个矩阵类型
+2. 按给定尺寸生成矩阵 `A`
+3. 在谱中心附近随机采一个复平面点 `z_random`
+4. 计算
+   `epsilon = sigma_min(z_random I - A)`
+5. 把“经过这个随机点的等高线”当成当前追踪任务
 
-## 3.偏导数的解耦与伪逆映射
+所以当前数据集里的任务定义和实际 benchmark / inference 是一致的：
+都是“随机点定义一条等高线”，而不是预先固定一批 `epsilon`。
 
-明确了前进方向 $\dot{z}$ 后，核心挑战在于：**如何不调用 SVD 也能同步更新高维奇异向量 $u$ 和 $v$？** 
+当前内置的矩阵类型有 9 类：
 
-我们回到耦合的变分方程组 (4a) 和 (4b)：
-$$
-\sigma\dot{u} - M\dot{v} = \dot{z}v \quad \text{(9a)} 
-$$
-$$
-M^*\dot{u} - \sigma\dot{v} = -\bar{\dot{z}}u \quad \text{(9b)} 
-$$
+- `random_complex`
+- `random_hermitian`
+- `random_real`
+- `ill_conditioned`
+- `random_normal`
+- `banded_nonnormal`
+- `low_rank_plus_noise`
+- `jordan_perturbed`
+- `block_structured`
 
-为了解耦 $\dot{v}$，我们在 (9a) 左侧乘以 $M^*$，在 (9b) 左侧乘以 $\sigma$：
-$$
-\sigma M^*\dot{u} - M^*M\dot{v} = \dot{z}M^*v 
-$$
-$$
-\sigma M^*\dot{u} - \sigma^2 \dot{v} = -\sigma\bar{\dot{z}}u 
-$$
-两式相减，成功消去 $\dot{u}$，得到关于 $\dot{v}$ 的方程：
-$$
-(M^*M - \sigma^2 I)\dot{v} = -(\dot{z}M^*v + \sigma\bar{\dot{z}}u) \quad \text{(10)} 
-$$
+### 3.2 专家标签怎么来
 
-同理，为了解耦 $\dot{u}$，在 (9b) 左侧乘以 $M$，在 (9a) 左侧乘以 $\sigma$，相减可得：
-$$
-(MM^* - \sigma^2 I)\dot{u} = -(\bar{\dot{z}}Mu + \sigma\dot{z}v) \quad \text{(11)} 
-$$
+数据不是从网络 rollout 里抄出来的，而是由 `ExpertSolver` 生成。
 
-**奇异性与摩尔-彭若斯伪逆 (Moore-Penrose Pseudoinverse)：**
-注意到算子 $(M^*M - \sigma^2 I)$ 是奇异的，因为由定义可知 $v$ 恰好位于它的零空间中（$(M^*M - \sigma^2 I)v = 0$）。然而，经过推导可以证明，方程 (10) 的右侧向量恰好与 $v$ 正交（即位于值域内）。因此，该线性方程系统存在一致解。
-我们使用摩尔-彭若斯伪逆 $(\cdot)^+$，可以求出唯一且天然垂直于 $v$ 的极小范数解，这完美契合了我们的正交向演化需求。
+专家的特点是：
 
-由此，我们得出了左、右奇异向量针对弧长 $s$ 的严格偏微分方程：
-$$
-\frac{dv}{ds} = -(M^*M - \epsilon^2 I)^+ \left( \frac{dz}{ds} M^*v + \epsilon \frac{d\bar{z}}{ds} u \right) \quad \text{(12a)} 
-$$
-$$
-\frac{du}{ds} = -(MM^* - \epsilon^2 I)^+ \left( \frac{d\bar{z}}{ds} Mu + \epsilon \frac{dz}{ds} v \right) \quad \text{(12b)} 
-$$
+- 用 full triplet RK4 推进 `(z,u,v)`
+- 每一步后做精确校正，保证点回到等高线上
+- 如果当前状态已经明显漂移，就直接打 `restart` 标签
 
-## 4.完整微分流形系统
+专家对每个状态给出两个标签：
 
-综上所述，我们将寻找伪谱等高线的全局离散搜索映射为一个完全确定的连续常微分方程初值问题（IVP）。完整的白盒底座系统如下：
+- `ds_expert`: 下一步建议步长
+- `y_restart`: 当前是否应该重启
 
-$$
-\begin{cases}
-  \frac{dz}{ds} = i \frac{v^*u}{|v^*u|}  \\[10pt]
-  \frac{dv}{ds} = -\big(M^*M - \epsilon^2 I\big)^+ \big( \dot{z} M^*v + \epsilon \bar{\dot{z}} u \big) \\[10pt]
-  \frac{du}{ds} = -\big(MM^* - \epsilon^2 I\big)^+ \big( \bar{\dot{z}} Mu + \epsilon \dot{z} v \big)
-\end{cases} \quad \text{(13)}
-$$
+此外还会保存一些诊断量，比如：
 
+- 残差
+- `sigma` 偏差
+- 是否发生了投影
+- 路径长度、绕行角度等
 
+### 3.3 为什么还要 DAgger
 
-# 伪代码
+如果只在“很干净的专家轨迹”上训练，网络会学得太理想化。
+一旦推理时状态有漂移，它可能就不会处理。
 
-```python
-import numpy as np
-import torch
+所以当前数据生成还会做一层 DAgger 风格增强：
 
-def neural_subspace_tracking(A, epsilon, z0, nn_controller, max_steps=1000):
-    """
-    神经增强的子空间追踪算法
-    :param A: 巨大的目标矩阵 (n x n)
-    :param epsilon: 我们要求解的伪谱等高线水平 (例如 0.1)
-    :param z0: 等高线上的一个初始起点 (复数)
-    :param nn_controller: 我们训练好的神经网络
-    """
-    
-    # ==========================================
-    # 1. 初始化（无可避免地做一次昂贵的完整 SVD）
-    # ==========================================
-    # 找到 z0 处精确的最小奇异对 (u, v)
-    z = z0
-    u, v = exact_SVD_computation(A, z, epsilon)  # 复杂度 O(n^3)
-    
-    trajectory = [z] # 记录轨迹
-    
-    # ==========================================
-    # 2. 核心追踪循环（沿着等高线狂飙）
-    # ==========================================
-    for step in range(max_steps):
-        
-        # 步骤 A：提取当前环境状态 (构建 NN 的输入)
-        # 包括：梯度大小 |u*v|，约束误差 ||u||-1，局部曲率等
-        state_features = extract_geometrical_state(z, u, v, A, epsilon)
-        
-        # 步骤 B：神经网络(大脑)下达指令！
-        # NN 根据当前地形，输出【最佳步长】和【是否需要求援(SVD)】
-        ds, need_restart = nn_controller(state_features)
-        
-        # ---------------------------------------------------
-        # 步骤 C：执行动作（算法的核心分水岭！）
-        # ---------------------------------------------------
-        if need_restart == True:
-            # 【AI 发现危险】：漂移太严重，或者遇到了奇点/急转弯
-            # 必须踩刹车，调用极其昂贵但精确的传统 SVD 进行“洗牌”校正
-            z, u, v = exact_SVD_computation(A, z, epsilon)  # 复杂度 O(n^3) 😱
-            
-        else:
-            # 【AI 认为安全】：一切在掌控中，用我们推导的微分方程飞速滑行！
-            # 计算导数 (调用前文推导的数学公式)
-            dz_ds, du_ds, dv_ds = compute_manifold_derivatives(z, u, v, A, epsilon)
-            
-            # 走一步 (这里用最简单的欧拉法示意，实际应用RK4)
-            z = z + ds * dz_ds
-            u = u + ds * du_ds
-            v = v + ds * dv_ds
-            
-            # 顺手把 u, v 拉回单位圆 (极低成本的正则化)
-            u = u / np.linalg.norm(u)
-            v = v / np.linalg.norm(v)
-            # 复杂度仅仅是几次矩阵向量乘积 O(n^2) 🚀
-            
-        trajectory.append(z)
-        
-        # 步骤 D：闭合检测
-        # 如果 z 绕了一圈回到了起点 z0 附近，等高线画完了！
-        if is_closed(z, z0) and step > 10:
-            print(f"追踪完成！总步数: {step}")
-            break
-            
-    return trajectory
-```
+- 对专家轨迹上的状态 `(z,u,v)` 做小扰动
+- 把扰动后的状态重新投影/查询专家
+- 记录专家在“坏状态”下的恢复动作
 
-# 网络设计
+这样训练集不仅有标准轨迹，也有偏离轨道后的恢复样本。
 
-## 1.状态空间设计：维度无关的标量不变量 
+### 3.4 数据集里存什么
 
-**网络的输入必须严格与矩阵的具体维度解耦**。
-在追踪的第 $t$ 步，我们提取当前状态 $(z_t, u_t, v_t)$ 的局部几何形貌与数值健康度，构建一个固定维度（如 7 维）的标量特征向量 $X_t \in \mathbb{R}^7$
+当前主数据文件 `dataset_full.npz` 里最重要的字段是：
 
-*   **数值漂移群 (Drift Indicators):**
-    *   $f_1 = | \text{Re}(u_t^* M_t v_t) - \epsilon |$：当前近似奇异值与目标等高线水平 $\epsilon$ 的绝对偏差（无需全量 SVD，通过 Rayleigh 商极低成本近似）。
-    *   $f_2 = |1 - \|u_t\|_2|, \quad f_3 = |1 - \|v_t\|_2|$：奇异向量数值漂移导致的正交约束/模长流失率。
-    *   $f_4 = \|M_t v_t - \epsilon u_t\|_2$：残差范数，反映当前 $u,v$ 逼近真实奇异向量的置信度。
-*   **局部几何群 (Geometric Topography):**
-    *   $f_5 = |u_t^* v_t|$：复梯度的模长。该值接近 0 时意味着伪谱等高线曲率急剧变化或面临拓扑分岔（如多个伪谱连通分支的合并点）。
-    *   $f_6 = |\arg(u_t^* v_t) - \arg(u_{t-1}^* v_{t-1})|$：切向方向的变化率，显式提供局部流形的曲率估计。
-*   **算力健康度 (Solver Health):**
-    *   $f_7 = N_{iter}$：上一积分步中，求解伪逆线性系统（如式 12）时 Krylov 求解器（如 MINRES/PCG）所消耗的迭代次数。迭代次数的异常飙升是矩阵接近奇异、算力即将崩溃的强烈前兆。
+- `features`
+- `ds_expert`
+- `y_restart`
+- `epsilon`
+- `matrix_size`
+- `matrix_type`
+- `matrix_id`
+- `trajectory_id`
+- `source`
 
-## 2.动作空间与网络架构 (Action Space & Architecture)
+其中：
 
-元控制器设计为一个轻量级的多层感知机（MLP），包含共享的隐藏层特征提取模块，并在最后一层分为两个分支头部（Two-Headed Output）：
+- `source=expert` 表示原始专家轨迹样本
+- `source=dagger` 表示扰动增强样本
 
-1.  **自适应步长头部 (Step Size Head, 回归任务):**
-    输出 $\Delta s_{t}$ 经过 `Softplus` 激活，确保预测步长严格为正。
-2.  **重启决策头部 (Restart Decision Head, 分类任务):**
-    输出概率 $P_{restart} \in (0, 1)$ 经过 `Sigmoid` 激活。当 $P_{restart} > 0.5$ 时，算法将主动中止 ODE 推进，调用一次具有绝对精度的 $O(n^3)$ SVD 重置当前状态 $(u_t, v_t)$，以消除累积误差。
+训练/验证/测试划分优先按 `trajectory_id` 分组，避免同一条轨迹同时落到不同 split。
 
-## 3.专家数据的生成与 DAgger 策略 (Dataset Aggregation)
+## 4. 神经网络架构
 
-我们采用行为克隆（Behavioral Cloning）训练该网络。训练所用的“专家神谕 (Expert Oracle)”是一个设置了极其严苛容差（如 `rtol=1e-8, atol=1e-8`）的高阶 Runge-Kutta 自适应求解器。
-数据生成流程包含以下关键设计：
-*   **收集理想轨迹：** 专家求解器在面临截断误差增大时会自动缩小步长。我们将专家最终采纳的最大安全步长记作 Ground-Truth $\Delta s_{expert}$。如果残差 $f_4$ 突破预设的安全阈值，专家将被迫执行 SVD，此时标记该步真实标签 $y_{expert} = 1$，反正为 $0$。
-*   **状态扰动增强 (DAgger):** 仅在“完美无瑕”的轨迹上训练，会导致网络在推理时面临“复合误差（Covariate Shift）”时不知所措。因此，我们在专家轨迹的状态中人为注入高斯扰动（模拟 ODE 的数值漂移），并记录专家在“糟糕状态”下的恢复行为（如立即断言要求 Restart 或极度缩小步长）。
+当前网络是一个很直接的两头 MLP。
 
-## 4.损失函数
+默认配置来自 `configs/default.yaml`：
 
-网络的总体损失函数 $\mathcal{L}_{total}$ 为回归损失与分类损失的加权和：
-$$ \mathcal{L}_{total} = \lambda_1 \mathcal{L}_{step} + \lambda_2 \mathcal{L}_{restart} $$
+- 输入维度：`14`
+- 隐层：`[128, 128, 64]`
+- 激活函数：`SiLU`
+- 归一化：`LayerNorm`
+- dropout：`0.05`
+- head hidden dim：`64`
 
-1.  **对数均方误差 (Log-MSE for Step Size):** 
-    由于伪谱边界在平缓区域与奇异点附近的最佳步长可能横跨多个数量级（如 $0.1$ 到 $0.0001$），直接使用 MSE 会导致大步长主导梯度。因此我们采用 Log-MSE：
-    $$ \mathcal{L}_{step} = \frac{1}{B} \sum_{i=1}^B \left( \log(\Delta s_{pred}^{(i)}) - \log(\Delta s_{expert}^{(i)}) \right)^2 $$
-2.  **加权二元交叉熵 (Weighted BCE for Restart):**
-    在整个追踪过程中，需要触发全量 SVD 纠偏的时刻是极小概率事件（存在严重的样本不平衡）。为此我们使用加权交叉熵（或 Focal Loss）对少数类（$y_{exp} = 1$）施加更高惩罚：
-    $$ \mathcal{L}_{restart} = -\frac{1}{B} \sum_{i=1}^B \bigg[ \alpha y_{exp}^{(i)} \log(P_{restart}^{(i)}) + (1-\alpha) (1 - y_{exp}^{(i)}) \log(1 - P_{restart}^{(i)}) \bigg] $$
+结构上分成三部分：
+
+1. 一个共享编码器
+2. 一个步长回归头
+3. 一个重启概率头
+
+也就是说，网络不会直接输出几何轨迹，而是输出控制信号。
+
+## 5. 网络输入是什么
+
+输入不是原始矩阵条目，也不是整个轨迹片段，而是一个维度无关的 14 维局部状态特征。
+
+### 5.1 前 10 维基础特征
+
+它们来自当前状态 `(z,u,v)`：
+
+1. 当前近似奇异值和目标 `epsilon` 的偏差
+2. `u` 的范数偏差
+3. `v` 的范数偏差
+4. 残差 `||Mv - epsilon u||`
+5. `|u^*v|`
+6. 当前相位相对上一步的变化
+7. 上一次线性求解器迭代次数
+8. `epsilon` 的尺度
+9. 矩阵尺度
+10. 当前点 `z` 相对矩阵尺度的位置
+
+这些量都会做归一化，很多是 log 归一化。
+
+### 5.2 后 4 维上下文特征
+
+它们不是当前几何量，而是控制上下文：
+
+11. 距离上次 restart 过了多少步
+12. 上一步用了多大步长
+13. 上一步是否做了 projection
+14. 上一步是否做了 restart
+
+所以这个网络本质上看到的是“当前局部几何 + 最近控制历史”。
+
+## 6. 网络输出是什么
+
+网络有两个输出：
+
+### 6.1 步长头
+
+输出下一步步长 `ds`。
+
+实现上：
+
+- 如果设置了 `step_size_max`，就把输出压到 `[step_size_min, step_size_max]`
+- 当前默认上界是 `0.1`
+
+### 6.2 重启头
+
+输出一个 `restart_prob`，表示当前位置是否应该做一次精确重启。
+
+需要强调的是：
+
+- 网络原始只输出概率
+- 当前主线推理并不是直接用 `0.5` 阈值硬判
+- 实际上它先经过 `AdaptiveInferenceController` 再决定是否真的 restart
+
+这个推理时控制器额外做了：
+
+- restart hysteresis：要连续高风险才真的触发
+- restart cooldown：避免连续重启
+- stable growth：连续稳定时把步长慢慢放大
+- projection-aware ceiling：如果最近投影太多，就把步长上限临时压低
+- curvature penalty：转向太猛时也会压步长
+
+所以推理时真正用的是：
+
+- `NNController`: 给原始 `ds` 和 `restart_prob`
+- `AdaptiveInferenceController`: 做推理期的稳定化包装
+
+这里有一个非常关键的实现细节：
+
+- 当前推理里的 `restart` 不是“停在原地不动”
+- 它的真实含义是：先在当前 `z` 上做一次精确 SVD，刷新 `(u,v)`，然后立刻继续这一推进步
+
+所以 `restart` 更准确地说是 **exact triplet refresh**。
+
+## 7. 训练方式
+
+### 7.1 训练目标
+
+训练时把问题拆成两个子任务：
+
+- 回归 `ds_expert`
+- 分类 `y_restart`
+
+### 7.2 损失函数
+
+总损失是两部分加权和：
+
+- step loss
+- restart loss
+
+当前实现里：
+
+- 步长部分用 log-MSE
+  - 只在 `y_restart=0` 的样本上算
+  - 这样更适合处理跨数量级步长
+- restart 部分用带 focal 因子的加权 BCE
+  - 因为 restart 是稀有事件，类别不平衡明显
+
+### 7.3 优化方式
+
+当前默认训练配置：
+
+- 优化器：`AdamW`
+- 学习率调度：`ReduceLROnPlateau`
+- early stopping：有
+- gradient clipping：有
+- 默认设备：`cpu`
+
+训练时直接读取离线数据集，不做在线交互训练。
+
+## 8. 当前推理算法是什么
+
+这一节最重要。
+
+需要先明确一个事实：
+
+**当前主线推理并不是 full triplet ODE rollout。**
+
+虽然代码里保留了对 `(z,u,v)` 做 RK4 / Heun 积分的能力，但当前真正跑 benchmark 和 `run_tracking` 时，走的是 `FAST_TANGENT_TRACKER_KWARGS` 这条快路径。
+
+这意味着：
+
+- `z` 按 ODE 切向推进
+- `u,v` 在大多数步里不会做完整 ODE 积分传播
+- `u,v` 主要通过“近似复用 + 必要时精确刷新/投影”来维护
+
+换句话说，当前主线更接近：
+
+**NN 控制步长 + 切向 ODE 推 `z` + 低频精确校正 `u,v`**
+
+而不是：
+
+**每一步都完整积分 `(z,u,v)`**
+
+### 8.0 当前推理真正用到的推导共识
+
+当前代码在推理时真正依赖的是下面几个结论：
+
+1. 在等高线上，最小奇异值三元组满足
+   - `(zI-A)v = epsilon u`
+   - `(zI-A)^*u = epsilon v`
+2. 记
+   - `gamma = v^*u`
+   则等高线切向可以写成
+   - `dz/ds = i * gamma / |gamma|`
+3. 局部法向修正也由 `gamma` 给出
+   - 法向方向就是 `gamma / |gamma|`
+4. 即使不重新做精确 SVD，也可以用当前携带的 `(u,v)` 在新点上估计
+   - 近似奇异值
+   - 残差
+   - 离等高线的大致距离
+
+当前主线高频使用的是第 2、3、4 条。
+
+也就是说，当前 NN+ODE 的分工是：
+
+- **ODE / 推导给方向**
+- **NN 给控制信号**
+- **projection / exact SVD 保证没有完全跑飞**
+
+### 8.1 初始化
+
+推理开始前先做一次精确 SVD：
+
+- 给定起点 `z0`
+- 得到精确的 `(u,v)`
+- 把当前状态初始化为 `(z,u,v)`
+
+这是整个追踪过程的精确起点。
+
+### 8.2 每一步的主循环
+
+当前主线每一步可以概括成下面 6 步：
+
+1. 从当前 `(z,u,v)` 提取 14 维特征
+2. `NNController` 预测原始 `ds` 和 `restart_prob`
+3. `AdaptiveInferenceController` 决定这一步最终实际用的 `ds`，以及是否真的触发 `restart`
+4. 如果触发 `restart`，就在当前 `z` 上做一次精确 SVD，刷新 `(u,v)`
+5. 用刷新后的或原有的 `(u,v)` 计算切向
+   - `dz/ds = i * (v^*u) / |v^*u|`
+   然后得到
+   - `z_candidate = z + ds * dz/ds`
+6. 检查当前 triplet 在 `z_candidate` 上是否还可信，并据此决定：
+   - 直接接受
+   - 暂时带误差接受，推迟修正
+   - 做局部法向 projection
+   - 必要时做精确刷新或更保守的回退投影
+
+走完以后再更新闭合检测、路径长度、绕行角等统计量。
+
+### 8.3 ODE 在这里具体起什么作用
+
+当前主线里，ODE 的主要作用是提供 **切向方向**：
+
+`dz/ds = i * gamma / |gamma|`
+
+其中 `gamma` 来自当前的奇异向量对。
+
+这一步告诉我们：
+
+- 在当前点上，沿等高线应该往哪个方向走
+
+所以网络并不负责“决定方向”，方向是白盒几何给的。
+网络只负责“走多远、何时精确纠偏”。
+
+### 8.4 当前推理里 `u,v` 是怎么处理的
+
+这是当前实现里最容易被误解的地方。
+
+当前主线推理时：
+
+- 候选点通常先只更新 `z`
+- `u,v` 默认先沿用旧值
+- 然后用这对旧 triplet 在新点上估计：
+  - 近似奇异值
+  - 残差
+  - 需要多大 projection 才能回到等高线
+
+如果这些近似量还好，就跳过精确刷新。
+如果不好，再做局部 projection 或精确 SVD 刷新。
+
+所以当前版本真正快的地方不是“神经网络前向传播很快”，而是：
+
+- 少做 SVD
+- 少做完整的 `u,v` 精确更新
+- 能用近似 triplet 的地方就先近似
+
+### 8.5 当前主线为什么比 full ODE 更快
+
+因为当前 fast path 做了三件事：
+
+1. 不对 `(u,v)` 每一步做 full RK4
+2. 允许若干步连续跳过 exact triplet refresh
+3. 允许轻微偏离时先延期 correction，而不是立刻精确处理
+
+这也是为什么当前版本的推理明显快于传统 baseline。
+
+### 8.6 把当前 NN+ODE 用一句话说清楚
+
+当前版本最准确的一句话是：
+
+> 网络不预测轨迹本身，只预测局部控制量；方向由伪谱流形的切向公式给出，位置 `z` 按切向 ODE 前进，`u,v` 尽量复用旧 triplet，只在误差累积到一定程度时再做 projection 或精确 SVD 刷新。
