@@ -300,7 +300,6 @@ class NewtonPredictorCorrectorTracker:
             "corrector_iterations": corrector_iterations,
             "predictor_halvings": predictor_halvings,
             "line_search_backtracks": line_search_backtracks,
-            "restart_indices": [],
             "projection_indices": [],
             "closed": bool(closed),
             "path_length": float(path_length),

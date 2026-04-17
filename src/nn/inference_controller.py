@@ -4,14 +4,12 @@ from typing import Any
 
 
 class AdaptiveInferenceController:
-    """Stateful inference-time adapter for less conservative NN rollouts.
+    """Stateful inference-time adapter for step-size-only rollouts.
 
-    The learned controller remains responsible for local decisions, but we add:
-    1. Restart hysteresis: require repeated high-risk signals before restarting.
-    2. Restart cooldown: avoid immediate repeated restarts.
-    3. Stable-step ramp-up: if several consecutive steps are clean, expand ds.
-    4. Projection-aware ceiling: repeated projections temporarily reduce the
-       allowed step-size ceiling during inference.
+    The learned controller outputs a raw step size, then this wrapper adds:
+    1. Stable-step ramp-up.
+    2. Projection-aware dynamic ceiling.
+    3. Curvature-aware ceiling shrinkage.
     """
 
     def __init__(
@@ -19,13 +17,8 @@ class AdaptiveInferenceController:
         base_controller,
         min_step_size: float,
         max_step_size: float | None = None,
-        restart_threshold: float = 0.9,
-        restart_reset_threshold: float = 0.6,
-        restart_confirm_steps: int = 2,
-        restart_cooldown_steps: int = 4,
         stable_growth_factor: float = 1.25,
         stable_growth_interval: int = 4,
-        stable_restart_prob: float = 0.2,
         stable_sigma_error: float = 5.0e-5,
         projection_shrink_factor: float = 0.85,
         projection_ceiling_recovery: float = 1.12,
@@ -41,13 +34,8 @@ class AdaptiveInferenceController:
         self.base_controller = base_controller
         self.min_step_size = float(min_step_size)
         self.max_step_size = None if max_step_size is None else float(max_step_size)
-        self.restart_threshold = float(restart_threshold)
-        self.restart_reset_threshold = float(restart_reset_threshold)
-        self.restart_confirm_steps = max(int(restart_confirm_steps), 1)
-        self.restart_cooldown_steps = max(int(restart_cooldown_steps), 0)
         self.stable_growth_factor = max(float(stable_growth_factor), 1.0)
         self.stable_growth_interval = max(int(stable_growth_interval), 1)
-        self.stable_restart_prob = float(stable_restart_prob)
         self.stable_sigma_error = float(stable_sigma_error)
         self.projection_shrink_factor = min(max(float(projection_shrink_factor), 0.1), 0.99)
         self.projection_ceiling_recovery = max(float(projection_ceiling_recovery), 1.0)
@@ -59,13 +47,11 @@ class AdaptiveInferenceController:
         self.curvature_turn_threshold = max(float(curvature_turn_threshold), 0.0)
         self.curvature_penalty_streak = max(int(curvature_penalty_streak), 1)
         self.curvature_shrink_factor = min(max(float(curvature_shrink_factor), 0.1), 0.99)
-        self.input_dim = int(getattr(base_controller, "input_dim", 10))
+        self.input_dim = int(getattr(base_controller, "input_dim", 8))
         self.reset()
 
     def reset(self) -> None:
         self._stable_steps = 0
-        self._high_restart_streak = 0
-        self._restart_cooldown = 0
         self._projection_free_steps = 0
         self._projection_streak = 0
         self._base_step_ceiling = None if self.max_step_size is None else float(self.max_step_size)
@@ -80,43 +66,28 @@ class AdaptiveInferenceController:
             ds_value = min(ds_value, self.max_step_size)
         return ds_value
 
-    def predict(self, state_np) -> tuple[float, bool]:
-        ds, need_restart, _ = self.predict_with_info(state_np)
-        return ds, need_restart
+    def predict(self, state_np) -> float:
+        ds, _ = self.predict_with_info(state_np)
+        return ds
 
-    def predict_with_info(self, state_np) -> tuple[float, bool, dict[str, Any]]:
+    def predict_with_info(self, state_np) -> tuple[float, dict[str, Any]]:
         if hasattr(self.base_controller, "predict_with_info"):
-            ds, _, info = self.base_controller.predict_with_info(state_np)
+            ds, info = self.base_controller.predict_with_info(state_np)
         else:
-            ds, _ = self.base_controller.predict(state_np)
+            ds = self.base_controller.predict(state_np)
             info = {}
 
         info = dict(info)
-        restart_prob = float(info.get("restart_prob", 0.0))
         ds_value = self._clamp_step_size(ds)
 
-        if restart_prob >= self.restart_threshold:
-            self._high_restart_streak += 1
-        elif restart_prob <= self.restart_reset_threshold:
-            self._high_restart_streak = 0
-
         growth_multiplier = 1.0
-        if self._stable_steps >= self.stable_growth_interval and restart_prob <= self.stable_restart_prob:
+        if self._stable_steps >= self.stable_growth_interval:
             growth_rounds = self._stable_steps // self.stable_growth_interval
             growth_multiplier = self.stable_growth_factor ** growth_rounds
         ds_value = self._clamp_step_size(ds_value * growth_multiplier)
 
-        need_restart = bool(
-            self._restart_cooldown == 0 and self._high_restart_streak >= self.restart_confirm_steps
-        )
-
         info.update(
             {
-                "restart_threshold": self.restart_threshold,
-                "restart_reset_threshold": self.restart_reset_threshold,
-                "restart_confirm_steps": self.restart_confirm_steps,
-                "restart_cooldown": int(self._restart_cooldown),
-                "high_restart_streak": int(self._high_restart_streak),
                 "stable_steps": int(self._stable_steps),
                 "projection_streak": int(self._projection_streak),
                 "projection_free_steps": int(self._projection_free_steps),
@@ -126,27 +97,11 @@ class AdaptiveInferenceController:
                 "dynamic_step_ceiling": self._dynamic_step_ceiling,
             }
         )
-        return ds_value, need_restart, info
+        return ds_value, info
 
     def observe_step(self, info: dict[str, Any]) -> None:
-        if self._restart_cooldown > 0:
-            self._restart_cooldown -= 1
-
-        if bool(info.get("applied_restart", False)):
-            self._stable_steps = 0
-            self._high_restart_streak = 0
-            self._restart_cooldown = self.restart_cooldown_steps
-            self._projection_streak = 0
-            self._projection_free_steps = 0
-            return
-
-        restart_prob = float(info.get("controller_info", {}).get("restart_prob", 0.0))
-        if restart_prob <= self.restart_reset_threshold and not bool(info.get("need_restart", False)):
-            self._high_restart_streak = 0
-
         applied_projection = bool(info.get("applied_projection", False))
-        sigma_error = float(info.get("sigma_error", 0.0))
-        raw_sigma_error = float(info.get("raw_sigma_error", sigma_error))
+        raw_sigma_error = float(info.get("raw_sigma_error", info.get("sigma_error", 0.0)))
         ds = max(float(info.get("ds", 0.0)), self.min_step_size)
         projection_distance = float(info.get("projection_distance", 0.0))
         tangent_turn = float(info.get("tangent_turn", 0.0))
@@ -194,8 +149,7 @@ class AdaptiveInferenceController:
             self._curvature_streak = 0
 
         is_stable = (
-            not bool(info.get("need_restart", False))
-            and not applied_projection
+            not applied_projection
             and int(info.get("backtracks", 0)) == 0
             and raw_sigma_error <= self.stable_sigma_error
         )

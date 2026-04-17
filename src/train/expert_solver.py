@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
+
 from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
 from src.solvers.rk4 import rk4_triplet_step
@@ -23,15 +24,13 @@ class ExpertStepResult:
     residual: float
     sigma_error: float
     gamma: float
-    y_restart: int
-    restart_reason: Optional[str] = None
     backtracks: int = 0
     applied_projection: bool = False
     suggested_next_step: float = 0.0
 
 
 class ExpertSolver:
-    """High-accuracy teacher policy for precise contour-tracking data generation."""
+    """High-accuracy teacher policy for step-size supervision."""
 
     def __init__(
         self,
@@ -41,9 +40,7 @@ class ExpertSolver:
         atol: float = 1e-8,
         max_step: float = 0.1,
         first_step: float = 0.03,
-        drift_threshold: float = 1e-4,
         closure_tol: float = 1e-3,
-        min_steps_before_restart: int = 5,
         min_steps_before_closure: int = 32,
         min_winding_angle: float = 1.5 * np.pi,
         projection_tol: float = 1e-8,
@@ -64,9 +61,7 @@ class ExpertSolver:
         self.atol = atol
         self.max_step = float(max_step)
         self.first_step = float(first_step)
-        self.drift_threshold = float(drift_threshold)
         self.closure_tol = float(closure_tol)
-        self.min_steps_before_restart = int(min_steps_before_restart)
         self.min_steps_before_closure = int(min_steps_before_closure)
         self.min_winding_angle = float(min_winding_angle)
         self.projection_tol = float(projection_tol)
@@ -80,6 +75,12 @@ class ExpertSolver:
         self.svd_solver = svd_solver or smallest_singular_triplet
         self.linear_solver = solver or PseudoinverseSolver()
         self.ode = ManifoldODE(self.A, self.epsilon, solver=self.linear_solver)
+
+    def _normalized_triplet(self, z: complex) -> tuple[np.ndarray, np.ndarray]:
+        _, u, v = self.svd_solver(self.A, z)
+        u = u / max(np.linalg.norm(u), 1e-15)
+        v = v / max(np.linalg.norm(v), 1e-15)
+        return u, v
 
     def compute_residual(self, z: complex, u: np.ndarray, v: np.ndarray) -> float:
         return residual_norm(self.A, z, u, v, self.epsilon)
@@ -240,74 +241,41 @@ class ExpertSolver:
             next_step *= self.nominal_growth
         return float(np.clip(next_step, self.min_step_size, self.max_step))
 
-    def _restart_reason(self, z: complex, u: np.ndarray, v: np.ndarray, steps_since_restart: int) -> Tuple[int, Optional[str], float, float, float]:
-        residual = self.compute_residual(z, u, v)
-        sigma_error = self.compute_sigma_error(z, u, v)
-        gamma = abs(np.vdot(v, u))
-        if gamma < 1e-6:
-            return 1, "singular_gamma", residual, sigma_error, gamma
-        if steps_since_restart >= self.min_steps_before_restart and residual > self.drift_threshold:
-            return 1, "drift", residual, sigma_error, gamma
-        if steps_since_restart >= self.min_steps_before_restart and sigma_error > self.drift_threshold:
-            return 1, "sigma_error", residual, sigma_error, gamma
-        return 0, None, residual, sigma_error, gamma
-
-    def step(self, z: complex, u: np.ndarray, v: np.ndarray, steps_since_restart: int = 0) -> ExpertStepResult:
-        return self._step_with_hint(z, u, v, steps_since_restart=steps_since_restart, first_step_hint=None)
+    def step(self, z: complex, u: np.ndarray, v: np.ndarray) -> ExpertStepResult:
+        return self._step_with_hint(z, u, v, first_step_hint=None)
 
     def _step_with_hint(
         self,
         z: complex,
         u: np.ndarray,
         v: np.ndarray,
-        steps_since_restart: int = 0,
         first_step_hint: Optional[float] = None,
     ) -> ExpertStepResult:
-        y_restart, restart_reason, residual, sigma_error, gamma = self._restart_reason(z, u, v, steps_since_restart)
-        if y_restart:
-            _, u_exact, v_exact = self.svd_solver(self.A, z)
-            u_exact = u_exact / max(np.linalg.norm(u_exact), 1e-15)
-            v_exact = v_exact / max(np.linalg.norm(v_exact), 1e-15)
-            return ExpertStepResult(
-                z_next=z,
-                u_next=u_exact,
-                v_next=v_exact,
-                ds_expert=0.0,
-                residual=residual,
-                sigma_error=sigma_error,
-                gamma=gamma,
-                y_restart=1,
-                restart_reason=restart_reason,
-                backtracks=0,
-                applied_projection=False,
-                suggested_next_step=max(self.first_step, self.min_step_size),
-            )
+        residual = self.compute_residual(z, u, v)
+        sigma_error = self.compute_sigma_error(z, u, v)
+        gamma = float(abs(np.vdot(v, u)))
 
+        step_u = u
+        step_v = v
+        if gamma < 1e-8:
+            step_u, step_v = self._normalized_triplet(z)
+
+        trial_step = self._propose_trial_step(first_step_hint)
         try:
-            trial_step = self._propose_trial_step(first_step_hint)
             z_next, u_next, v_next, ds_expert, step_info = self._advance_projected_step(
                 z=z,
-                u=u,
-                v=v,
+                u=step_u,
+                v=step_v,
                 ds=trial_step,
             )
         except RuntimeError:
-            _, u_exact, v_exact = self.svd_solver(self.A, z)
-            u_exact = u_exact / max(np.linalg.norm(u_exact), 1e-15)
-            v_exact = v_exact / max(np.linalg.norm(v_exact), 1e-15)
-            return ExpertStepResult(
-                z_next=z,
-                u_next=u_exact,
-                v_next=v_exact,
-                ds_expert=0.0,
-                residual=residual,
-                sigma_error=sigma_error,
-                gamma=gamma,
-                y_restart=1,
-                restart_reason="projection_failed",
-                backtracks=self.max_backtracks,
-                applied_projection=False,
-                suggested_next_step=max(self.first_step, self.min_step_size),
+            u_exact, v_exact = self._normalized_triplet(z)
+            retry_step = max(self.min_step_size, min(self.first_step, trial_step))
+            z_next, u_next, v_next, ds_expert, step_info = self._advance_projected_step(
+                z=z,
+                u=u_exact,
+                v=v_exact,
+                ds=retry_step,
             )
 
         return ExpertStepResult(
@@ -318,8 +286,6 @@ class ExpertSolver:
             residual=residual,
             sigma_error=sigma_error,
             gamma=gamma,
-            y_restart=0,
-            restart_reason=None,
             backtracks=int(step_info["backtracks"]),
             applied_projection=bool(step_info["applied_projection"]),
             suggested_next_step=self._adapt_next_step_size(
@@ -336,15 +302,11 @@ class ExpertSolver:
         step_callback=None,
         max_wall_seconds: float | None = None,
     ) -> List[Dict]:
-        _, u, v = self.svd_solver(self.A, z0)
-        u = u / max(np.linalg.norm(u), 1e-15)
-        v = v / max(np.linalg.norm(v), 1e-15)
+        u, v = self._normalized_triplet(z0)
         z = complex(z0)
-        steps_since_restart = 0
         step_hint = self.first_step
         prev_ds = 0.0
         prev_applied_projection = False
-        prev_applied_restart = False
         trajectory = []
         start_time = time.perf_counter()
         path_length = 0.0
@@ -355,7 +317,7 @@ class ExpertSolver:
 
         for step_idx in range(max_steps):
             z_prev = z
-            result = self._step_with_hint(z, u, v, steps_since_restart=steps_since_restart, first_step_hint=step_hint)
+            result = self._step_with_hint(z, u, v, first_step_hint=step_hint)
             elapsed_seconds = float(time.perf_counter() - start_time)
             step_distance = float(abs(result.z_next - z_prev))
             path_length += step_distance
@@ -370,17 +332,15 @@ class ExpertSolver:
             elif abs(result.z_next - closure_anchor) >= 1e-12:
                 prev_anchor_angle = float(np.angle(result.z_next - closure_anchor))
 
-            closed = False
-            if result.y_restart == 0:
-                closed = self._check_closure(
-                    z_current=result.z_next,
-                    z_start=z0,
-                    current_step=step_idx + 1,
-                    path_length=path_length,
-                    max_distance_from_start=max_distance_from_start,
-                    winding_angle=winding_angle,
-                    last_step_size=max(float(result.ds_expert), self.min_step_size),
-                )
+            closed = self._check_closure(
+                z_current=result.z_next,
+                z_start=z0,
+                current_step=step_idx + 1,
+                path_length=path_length,
+                max_distance_from_start=max_distance_from_start,
+                winding_angle=winding_angle,
+                last_step_size=max(float(result.ds_expert), self.min_step_size),
+            )
 
             record = {
                 "z": z_prev,
@@ -390,16 +350,12 @@ class ExpertSolver:
                 "u_next": result.u_next.copy(),
                 "v_next": result.v_next.copy(),
                 "ds_expert": result.ds_expert,
-                "y_restart": result.y_restart,
-                "restart_reason": result.restart_reason,
                 "residual": result.residual,
                 "sigma_error": result.sigma_error,
                 "gamma": result.gamma,
                 "step": step_idx,
-                "steps_since_restart": int(steps_since_restart),
                 "prev_ds": float(prev_ds),
                 "prev_applied_projection": bool(prev_applied_projection),
-                "prev_applied_restart": bool(prev_applied_restart),
                 "elapsed_seconds": elapsed_seconds,
                 "backtracks": result.backtracks,
                 "applied_projection": result.applied_projection,
@@ -414,15 +370,9 @@ class ExpertSolver:
                 step_callback(record)
 
             z, u, v = result.z_next, result.u_next, result.v_next
-            prev_ds = 0.0 if result.y_restart else float(result.ds_expert)
+            prev_ds = float(result.ds_expert)
             prev_applied_projection = bool(result.applied_projection)
-            prev_applied_restart = bool(result.y_restart)
-            steps_since_restart = 0 if result.y_restart else steps_since_restart + 1
-            step_hint = (
-                max(self.first_step, self.min_step_size)
-                if result.y_restart
-                else float(result.suggested_next_step)
-            )
+            step_hint = float(result.suggested_next_step)
 
             if closed:
                 break

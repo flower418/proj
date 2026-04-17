@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import numpy as np
+
 from src.nn.features import assemble_controller_features, extract_features
 from src.solvers.rk4 import heun_triplet_step, rk4_triplet_step
 from src.utils.contour_init import project_to_contour, sigma_min_at
@@ -27,11 +28,8 @@ class TrackerState:
     z: complex
     u: np.ndarray
     v: np.ndarray
-    prev_gamma_arg: float | None = None
-    steps_since_restart: int = 0
     prev_ds: float = 0.0
     prev_applied_projection: bool = False
-    prev_applied_restart: bool = False
 
 
 class ContourTracker:
@@ -46,7 +44,6 @@ class ContourTracker:
         closure_tol: float = 1e-3,
         min_steps_before_closure: int = 32,
         min_winding_angle: float = 1.5 * np.pi,
-        min_steps_between_restarts: int = 5,
         projection_tol: float = 1e-4,
         min_step_size: float = 1e-6,
         max_backtracks: int = 8,
@@ -63,11 +60,10 @@ class ContourTracker:
         self.ode_system = ode_system
         self.controller = controller
         self.svd_solver = svd_solver or smallest_singular_triplet
-        self.fixed_step_size = fixed_step_size
-        self.closure_tol = closure_tol
+        self.fixed_step_size = float(fixed_step_size)
+        self.closure_tol = float(closure_tol)
         self.min_steps_before_closure = int(min_steps_before_closure)
         self.min_winding_angle = float(min_winding_angle)
-        self.min_steps_between_restarts = int(min_steps_between_restarts)
         self.projection_tol = float(projection_tol)
         self.min_step_size = float(min_step_size)
         self.max_backtracks = int(max_backtracks)
@@ -91,34 +87,26 @@ class ContourTracker:
         _, u0, v0 = self.svd_solver(self.A, z0)
         return u0, v0
 
-    def exact_svd_restart(self, z: complex) -> Tuple[complex, np.ndarray, np.ndarray]:
+    def refresh_triplet(self, z: complex) -> Tuple[complex, np.ndarray, np.ndarray]:
         _, u, v = self.svd_solver(self.A, z)
         return z, u, v
 
     def extract_state_features(self, z, u, v, prev_state=None) -> np.ndarray:
-        prev_gamma_arg = None if prev_state is None else prev_state.prev_gamma_arg
-        prev_solver_iters = getattr(self.ode_system.solver, "get_iteration_count", lambda: 0)()
         base_features = extract_features(
             z=z,
             u=u,
             v=v,
             A=self.A,
             epsilon=self.epsilon,
-            prev_gamma_arg=prev_gamma_arg,
-            prev_solver_iters=prev_solver_iters,
         )
         controller_model = getattr(self.controller, "base_controller", self.controller)
-        input_dim = int(getattr(controller_model, "input_dim", len(base_features)))
-        steps_since_restart = 0 if prev_state is None else int(prev_state.steps_since_restart)
+        input_dim = int(getattr(controller_model, "input_dim", len(base_features) + 2))
         prev_ds = 0.0 if prev_state is None else float(prev_state.prev_ds)
         prev_applied_projection = False if prev_state is None else bool(prev_state.prev_applied_projection)
-        prev_applied_restart = False if prev_state is None else bool(prev_state.prev_applied_restart)
         return assemble_controller_features(
             base_features,
-            steps_since_restart=steps_since_restart,
             prev_ds=prev_ds,
             prev_applied_projection=prev_applied_projection,
-            prev_applied_restart=prev_applied_restart,
             input_dim=input_dim,
         )
 
@@ -244,17 +232,10 @@ class ContourTracker:
         u: np.ndarray,
         v: np.ndarray,
         ds: float,
-        use_restart_state: bool,
         deferred_projection_streak: int = 0,
         steps_since_exact_triplet_refresh: int = 0,
     ) -> Tuple[complex, np.ndarray, np.ndarray, float, dict]:
-        if use_restart_state:
-            _, u_base, v_base = self.exact_svd_restart(z)
-            u_base = u_base / max(np.linalg.norm(u_base), 1e-15)
-            v_base = v_base / max(np.linalg.norm(v_base), 1e-15)
-        else:
-            u_base, v_base = u, v
-
+        u_base, v_base = u, v
         ds_try = max(float(ds), self.min_step_size)
         last_error = None
         last_candidate = None
@@ -269,7 +250,6 @@ class ContourTracker:
 
             can_use_approx_triplet = (
                 self.integration_method == "tangent"
-                and not use_restart_state
                 and self.exact_triplet_refresh_interval > 0
                 and steps_since_exact_triplet_refresh < self.exact_triplet_refresh_interval
                 and self.approx_triplet_sigma_tol is not None
@@ -431,7 +411,7 @@ class ContourTracker:
             except ValueError:
                 z_projected, sigma_projected = None, None
             if z_projected is not None and abs(sigma_projected - self.epsilon) <= max(self.projection_tol, 1e-8):
-                _, u_projected, v_projected = self.exact_svd_restart(z_projected)
+                _, u_projected, v_projected = self.refresh_triplet(z_projected)
                 u_projected = u_projected / max(np.linalg.norm(u_projected), 1e-15)
                 v_projected = v_projected / max(np.linalg.norm(v_projected), 1e-15)
                 return z_projected, u_projected, v_projected, ds_try, {
@@ -472,22 +452,19 @@ class ContourTracker:
     def track(self, z0: complex, max_steps: int = 1000, step_callback=None) -> Dict:
         if self.controller is not None and hasattr(self.controller, "reset"):
             self.controller.reset()
+
         z0, sigma_at_start = self._project_initial_point(z0)
         u, v = self.initialize(z0)
         state = TrackerState(
             z=z0,
             u=u,
             v=v,
-            prev_gamma_arg=None,
-            steps_since_restart=self.min_steps_between_restarts,
             prev_ds=0.0,
             prev_applied_projection=False,
-            prev_applied_restart=False,
         )
         trajectory = [z0]
         u_history = [u.copy()]
         v_history = [v.copy()]
-        restart_indices = []
         step_sizes = []
         feature_history = []
         path_length = 0.0
@@ -496,7 +473,6 @@ class ContourTracker:
         prev_anchor_angle = None if abs(z0 - closure_anchor) < 1e-12 else float(np.angle(z0 - closure_anchor))
         winding_angle = 0.0
         closed = False
-        steps_since_restart = self.min_steps_between_restarts
         projection_indices = []
         deferred_projection_streak = 0
         steps_since_exact_triplet_refresh = 0
@@ -511,28 +487,22 @@ class ContourTracker:
             feature_history.append(features)
             if self.controller is not None:
                 if hasattr(self.controller, "predict_with_info"):
-                    ds, need_restart, controller_info = self.controller.predict_with_info(features)
+                    ds, controller_info = self.controller.predict_with_info(features)
                 else:
-                    ds, need_restart = self.controller.predict(features)
+                    ds = self.controller.predict(features)
                     controller_info = {}
             else:
                 ds = self.fixed_step_size
-                need_restart = False
                 controller_info = {}
+
             raw_ds = max(float(ds), 1e-12)
             ds = max(raw_ds, self.min_step_size)
-
-            applied_restart = bool(need_restart and steps_since_restart >= self.min_steps_between_restarts)
-            if applied_restart:
-                restart_indices.append(len(trajectory) - 1)
-                steps_since_restart = 0
 
             z, u, v, accepted_ds, step_diagnostics = self._advance_with_backtracking(
                 state.z,
                 state.u,
                 state.v,
                 ds=ds,
-                use_restart_state=applied_restart,
                 deferred_projection_streak=deferred_projection_streak,
                 steps_since_exact_triplet_refresh=steps_since_exact_triplet_refresh,
             )
@@ -577,16 +547,12 @@ class ContourTracker:
                 )
             prev_tangent_angle = current_tangent_angle
 
-            steps_since_restart = 0 if applied_restart else steps_since_restart + 1
             state = TrackerState(
                 z=z,
                 u=u,
                 v=v,
-                prev_gamma_arg=np.angle(np.vdot(u, v)),
-                steps_since_restart=steps_since_restart,
                 prev_ds=float(accepted_ds),
                 prev_applied_projection=applied_projection,
-                prev_applied_restart=applied_restart,
             )
             trajectory.append(z)
             u_history.append(u.copy())
@@ -601,8 +567,6 @@ class ContourTracker:
                         "z_next": z,
                         "raw_ds": float(raw_ds),
                         "ds": float(accepted_ds),
-                        "need_restart": bool(need_restart),
-                        "applied_restart": applied_restart,
                         "step_distance": step_distance,
                         "distance_to_start": float(np.abs(z - z0)),
                         "path_length": float(path_length),
@@ -621,7 +585,6 @@ class ContourTracker:
                         "triplet_refresh_mode": step_diagnostics.get("triplet_refresh_mode", "exact_svd"),
                         "triplet_residual": float(step_diagnostics.get("triplet_residual", 0.0)),
                         "steps_since_exact_triplet_refresh": int(steps_since_exact_triplet_refresh),
-                        "steps_since_restart": int(state.steps_since_restart),
                         "tangent_turn": float(tangent_turn),
                         "controller_info": controller_info,
                         "features": features.copy(),
@@ -632,8 +595,6 @@ class ContourTracker:
                     {
                         "step": step,
                         "ds": float(accepted_ds),
-                        "need_restart": bool(need_restart),
-                        "applied_restart": applied_restart,
                         "applied_projection": applied_projection,
                         "backtracks": int(step_diagnostics["backtracks"]),
                         "sigma_error": float(sigma_error_after_correction),
@@ -655,7 +616,7 @@ class ContourTracker:
                 z_prev=z_prev,
             ):
                 if np.abs(z - z0) >= self._effective_closure_tol(accepted_ds):
-                    _, u_closure, v_closure = self.exact_svd_restart(z0)
+                    _, u_closure, v_closure = self.refresh_triplet(z0)
                     trajectory[-1] = z0
                     u_history[-1] = u_closure.copy()
                     v_history[-1] = v_closure.copy()
@@ -666,7 +627,6 @@ class ContourTracker:
             "trajectory": np.asarray(trajectory, dtype=np.complex128),
             "u_history": u_history,
             "v_history": v_history,
-            "restart_indices": restart_indices,
             "step_sizes": step_sizes,
             "feature_history": np.asarray(feature_history, dtype=np.float32),
             "closed": closed,

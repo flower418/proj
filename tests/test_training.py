@@ -4,16 +4,13 @@ from src.nn.loss import ControllerLoss
 from src.utils.config import validate_config
 
 
-def test_focal_loss_runs():
+def test_step_loss_runs():
     loss_fn = ControllerLoss()
     ds_pred = torch.tensor([0.01, 0.02, 0.03], dtype=torch.float32)
     ds_true = torch.tensor([0.01, 0.02, 0.01], dtype=torch.float32)
-    p_restart = torch.tensor([0.1, 0.9, 0.2], dtype=torch.float32)
-    y_restart = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
-    total, step, restart = loss_fn(ds_pred, ds_true, p_restart, y_restart)
+    total, step = loss_fn(ds_pred, ds_true)
     assert torch.isfinite(total)
     assert torch.isfinite(step)
-    assert torch.isfinite(restart)
 
 
 def test_config_validation_accepts_default_shape():
@@ -33,7 +30,7 @@ def test_config_validation_accepts_default_shape():
         "training": {
             "batch_size": 8,
             "learning_rate": 1e-3,
-            "focal_gamma": 2.0,
+            "lambda_step": 1.0,
             "scheduler_factor": 0.5,
             "scheduler_patience": 5,
         },

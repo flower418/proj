@@ -37,9 +37,6 @@ def parse_args():
     parser.add_argument("--step-size-min", type=float, default=None)
     parser.add_argument("--step-size-max", type=float, default=None)
     parser.add_argument("--lambda-step", type=float, default=None)
-    parser.add_argument("--lambda-restart", type=float, default=None)
-    parser.add_argument("--alpha-restart", type=float, default=None)
-    parser.add_argument("--focal-gamma", type=float, default=None)
     parser.add_argument("--early-stop-patience", type=int, default=None)
     parser.add_argument("--gradient-clip-norm", type=float, default=None)
     return parser.parse_args()
@@ -67,12 +64,6 @@ def main():
     training_cfg = dict(config["training"])
     if args.lambda_step is not None:
         training_cfg["lambda_step"] = args.lambda_step
-    if args.lambda_restart is not None:
-        training_cfg["lambda_restart"] = args.lambda_restart
-    if args.alpha_restart is not None:
-        training_cfg["alpha_restart"] = args.alpha_restart
-    if args.focal_gamma is not None:
-        training_cfg["focal_gamma"] = args.focal_gamma
     if args.gradient_clip_norm is not None:
         training_cfg["gradient_clip_norm"] = args.gradient_clip_norm
     batch_size = args.batch_size if args.batch_size is not None else training_cfg["batch_size"]
@@ -84,7 +75,6 @@ def main():
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("请求使用 CUDA 训练，但当前 PyTorch 未检测到可用 GPU。")
 
-    # 加载数据
     train_loader, val_loader, test_loader = create_dataloaders(
         args.data_dir,
         batch_size=batch_size,
@@ -94,28 +84,21 @@ def main():
     print(f"Train batches: {len(train_loader)}")
     print(f"Val batches: {len(val_loader)}")
 
-    # 创建模型
     model = build_controller(
         controller_cfg,
-        input_dim=int(controller_cfg.get("input_dim", config["controller"].get("input_dim", 7))),
+        input_dim=int(controller_cfg.get("input_dim", config["controller"].get("input_dim", 8))),
     ).to(device)
 
-    # 损失函数
     loss_fn = ControllerLoss(
         lambda_step=training_cfg["lambda_step"],
-        lambda_restart=training_cfg["lambda_restart"],
-        alpha_restart=training_cfg["alpha_restart"],
-        focal_gamma=training_cfg["focal_gamma"],
     )
 
-    # 优化器
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=learning_rate,
         weight_decay=weight_decay,
     )
 
-    # 学习率调度器
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
@@ -123,7 +106,6 @@ def main():
         patience=training_cfg["scheduler_patience"],
     )
 
-    # 日志
     logger = TrainingLogger(log_dir=args.log_dir, experiment_name=args.experiment_name)
     logger.save_config({
         "config": config,
@@ -141,7 +123,6 @@ def main():
         sample_batch = next(iter(train_loader))
         logger.log_feature_distribution(sample_batch["features"].cpu().numpy(), epoch=0)
 
-    # 训练器
     trainer = ControllerTrainer(
         model=model,
         loss_fn=loss_fn,
@@ -152,7 +133,6 @@ def main():
         gradient_clip_norm=gradient_clip_norm,
     )
 
-    # 训练
     epochs = args.epochs if args.epochs is not None else training_cfg["epochs"]
     experiment_dir = Path(args.checkpoint_dir) / args.experiment_name
     history = trainer.train(
@@ -165,24 +145,20 @@ def main():
     if not history:
         raise RuntimeError("训练未运行任何 epoch，请检查 epochs 和数据集划分。")
 
-    # 保存训练历史
     history_path = experiment_dir / "training_history.json"
     history_path.parent.mkdir(parents=True, exist_ok=True)
     with history_path.open("w") as f:
         json.dump(history, f, indent=2)
 
-    # 在测试集上评估
     print("\n在测试集上评估...")
     test_metrics = trainer.evaluate(test_loader)
     raw = test_metrics.pop("_raw", None)
     print(f"Test Loss: {test_metrics['loss']:.6f}")
-    print(f"Test Accuracy: {test_metrics.get('accuracy', 0):.4f}")
-    print(f"Test F1: {test_metrics.get('f1', 0):.4f}")
+    print(f"Test Step MAE: {test_metrics.get('step_size_mae', 0):.6f}")
+    print(f"Test Step R2: {test_metrics.get('step_size_r2', 0):.4f}")
     if raw is not None:
-        logger.log_confusion_matrix(raw["y_true"], (raw["y_prob"] >= 0.5).astype(int), epoch=len(history))
         logger.log_prediction_scatter(raw["ds_pred"], raw["ds_true"], epoch=len(history))
 
-    # 保存测试指标
     metrics_path = experiment_dir / "test_metrics.json"
     with metrics_path.open("w") as f:
         json.dump(test_metrics, f, indent=2)

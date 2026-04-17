@@ -40,7 +40,6 @@ def generate_trajectory(
         controller=None,
         fixed_step_size=expert.first_step,
         closure_tol=expert.closure_tol,
-        min_steps_between_restarts=expert.min_steps_before_restart,
         projection_tol=expert.projection_tol,
         min_step_size=expert.min_step_size,
         max_backtracks=expert.max_backtracks,
@@ -48,12 +47,9 @@ def generate_trajectory(
 
     u, v = tracker.initialize(z0)
     z = complex(z0)
-    steps_since_restart = expert.min_steps_before_restart
     step_hint = expert.first_step
-    prev_gamma_arg = None
     prev_ds = 0.0
     prev_applied_projection = False
-    prev_applied_restart = False
     trajectory = []
     path_length = 0.0
     max_distance_from_start = 0.0
@@ -63,7 +59,7 @@ def generate_trajectory(
 
     for step_idx in range(max_steps):
         z_prev = z
-        expert_result = expert._step_with_hint(z, u, v, steps_since_restart, step_hint)
+        expert_result = expert._step_with_hint(z, u, v, first_step_hint=step_hint)
 
         base_features = extract_features(
             z=z,
@@ -71,15 +67,11 @@ def generate_trajectory(
             v=v,
             A=A,
             epsilon=epsilon,
-            prev_gamma_arg=prev_gamma_arg,
-            prev_solver_iters=expert.ode.solver.get_iteration_count(),
         )
         features = assemble_controller_features(
             base_features,
-            steps_since_restart=steps_since_restart,
             prev_ds=prev_ds,
             prev_applied_projection=prev_applied_projection,
-            prev_applied_restart=prev_applied_restart,
         )
 
         step_record = {
@@ -88,40 +80,30 @@ def generate_trajectory(
             "v": v.copy(),
             "features": features,
             "ds_expert": float(expert_result.ds_expert),
-            "y_restart": int(expert_result.y_restart),
-            "restart_reason": expert_result.restart_reason,
             "residual": float(expert_result.residual),
             "sigma_error": float(expert_result.sigma_error),
-            "steps_since_restart": int(steps_since_restart),
             "prev_ds": float(prev_ds),
             "prev_applied_projection": bool(prev_applied_projection),
-            "prev_applied_restart": bool(prev_applied_restart),
         }
 
-        if expert_result.y_restart:
-            z_next, u_next, v_next = tracker.exact_svd_restart(z)
-            applied_projection = False
-            step_distance = 0.0
-        else:
-            z_next, u_next, v_next, _, step_info = tracker._advance_with_backtracking(
-                z=z,
-                u=u,
-                v=v,
-                ds=max(float(expert_result.ds_expert), expert.min_step_size),
-                use_restart_state=False,
-            )
-            applied_projection = bool(step_info["applied_projection"])
-            step_distance = float(np.abs(z_next - z))
-            path_length += step_distance
-            max_distance_from_start = max(max_distance_from_start, float(np.abs(z_next - z0)))
-            if prev_anchor_angle is not None and abs(z_next - closure_anchor) >= 1e-12:
-                current_anchor_angle = float(np.angle(z_next - closure_anchor))
-                delta = current_anchor_angle - prev_anchor_angle
-                delta = float(np.angle(np.exp(1j * delta)))
-                winding_angle += delta
-                prev_anchor_angle = current_anchor_angle
-            elif abs(z_next - closure_anchor) >= 1e-12:
-                prev_anchor_angle = float(np.angle(z_next - closure_anchor))
+        z_next, u_next, v_next, _, step_info = tracker._advance_with_backtracking(
+            z=z,
+            u=u,
+            v=v,
+            ds=max(float(expert_result.ds_expert), expert.min_step_size),
+        )
+        applied_projection = bool(step_info["applied_projection"])
+        step_distance = float(np.abs(z_next - z))
+        path_length += step_distance
+        max_distance_from_start = max(max_distance_from_start, float(np.abs(z_next - z0)))
+        if prev_anchor_angle is not None and abs(z_next - closure_anchor) >= 1e-12:
+            current_anchor_angle = float(np.angle(z_next - closure_anchor))
+            delta = current_anchor_angle - prev_anchor_angle
+            delta = float(np.angle(np.exp(1j * delta)))
+            winding_angle += delta
+            prev_anchor_angle = current_anchor_angle
+        elif abs(z_next - closure_anchor) >= 1e-12:
+            prev_anchor_angle = float(np.angle(z_next - closure_anchor))
 
         step_record.update(
             {
@@ -145,25 +127,17 @@ def generate_trajectory(
                     "step_distance": float(step_distance),
                     "path_length": float(path_length),
                     "winding_angle": float(winding_angle),
-                    "y_restart": int(expert_result.y_restart),
                     "applied_projection": bool(applied_projection),
                     "sigma_error": float(expert_result.sigma_error),
                 }
             )
 
         z, u, v = z_next, u_next, v_next
-        prev_gamma_arg = float(np.angle(np.vdot(u, v)))
-        prev_ds = 0.0 if expert_result.y_restart else float(expert_result.ds_expert)
+        prev_ds = float(expert_result.ds_expert)
         prev_applied_projection = bool(applied_projection)
-        prev_applied_restart = bool(expert_result.y_restart)
-        steps_since_restart = 0 if expert_result.y_restart else steps_since_restart + 1
-        step_hint = (
-            max(expert.first_step, expert.min_step_size)
-            if expert_result.y_restart
-            else float(expert_result.suggested_next_step)
-        )
+        step_hint = float(expert_result.suggested_next_step)
 
-        if not expert_result.y_restart and tracker.check_closure(
+        if tracker.check_closure(
             z_current=z,
             z_start=z0,
             current_step=step_idx + 1,
@@ -245,7 +219,6 @@ def generate_diverse_dataset(
         "matrix_types": {},
         "matrix_sizes": {},
         "trajectories": 0,
-        "restart_samples": 0,
         "supported_matrix_types": list(SUPPORTED_MATRIX_TYPES),
         "sampling_strategy": "random_point_sigma",
         "feature_dim": None,
@@ -306,8 +279,6 @@ def generate_diverse_dataset(
                         record["epsilon"] = float(epsilon)
                         all_records.append(record)
                         stats["total_samples"] += 1
-                        if record["y_restart"] == 1:
-                            stats["restart_samples"] += 1
 
                     if dagger_factor > 0:
                         dagger_progress_printer = _make_dagger_progress_printer(run_logger)
@@ -328,8 +299,6 @@ def generate_diverse_dataset(
                             record["epsilon"] = float(epsilon)
                             all_records.append(record)
                             stats["total_samples"] += 1
-                            if record["y_restart"] == 1:
-                                stats["restart_samples"] += 1
                     else:
                         augmented = []
                         _log_message(run_logger, "    DAgger 跳过：0 条增强样本")
@@ -357,7 +326,6 @@ def generate_diverse_dataset(
                                 "raw_samples": len(trajectory),
                                 "augmented_samples": len(augmented),
                                 "total_samples": stats["total_samples"],
-                                "restart_samples": stats["restart_samples"],
                             },
                         )
 
@@ -397,7 +365,6 @@ def generate_diverse_dataset(
             if len(all_records) >= target_samples:
                 break
 
-    # 最终保存
     save_dataset(all_records, output_path, "dataset_full", stats, rng=rng)
     return stats
 
@@ -406,7 +373,6 @@ def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict 
     """保存数据集"""
     features = np.stack([r["features"] for r in records])
     ds_expert = np.array([r["ds_expert"] for r in records], dtype=np.float32)
-    y_restart = np.array([r["y_restart"] for r in records], dtype=np.int64)
     epsilon = np.array([r.get("epsilon", 0.0) for r in records], dtype=np.float32)
     matrix_size = np.array([r.get("matrix_size", -1) for r in records], dtype=np.int64)
     matrix_type = np.array([str(r.get("matrix_type", "")) for r in records], dtype=np.str_)
@@ -418,7 +384,6 @@ def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict 
         output_path / f"{name}.npz",
         features=features,
         ds_expert=ds_expert,
-        y_restart=y_restart,
         epsilon=epsilon,
         matrix_size=matrix_size,
         matrix_type=matrix_type,
@@ -427,7 +392,6 @@ def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict 
         source=source,
     )
 
-    # 保存划分
     n = len(records)
     rng = rng or np.random.default_rng(0)
     unique_trajectories = np.asarray(np.unique(trajectory_id), dtype=np.str_)
@@ -466,7 +430,6 @@ def save_dataset(records: List[Dict], output_path: Path, name: str, stats: dict 
         print(f"  Train: {len(train_indices)} ({100*len(train_indices)/n:.1f}%)")
         print(f"  Val: {len(val_indices)} ({100*len(val_indices)/n:.1f}%)")
         print(f"  Test: {len(test_indices)} ({100*len(test_indices)/n:.1f}%)")
-        print(f"  重启样本：{stats['restart_samples']} ({100*stats['restart_samples']/n:.2f}%)")
 
 
 def parse_args():
@@ -501,7 +464,7 @@ def main():
         )
         summary_path = run_logger.write_json("generation_summary.json", stats)
         run_logger.log(
-            f"完成！总样本：{stats['total_samples']:,}, 重启：{stats['restart_samples']:,}, "
+            f"完成！总样本：{stats['total_samples']:,}, "
             f"log_dir={run_logger.log_dir}, summary={summary_path}"
         )
 

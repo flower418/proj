@@ -49,13 +49,12 @@ def validate_config(config: Dict[str, Any]) -> None:
 
     if int(training.get("batch_size", 0)) <= 0:
         raise ValueError("training.batch_size must be positive.")
-
     if float(training.get("learning_rate", 0.0)) <= 0:
         raise ValueError("training.learning_rate must be positive.")
     if float(training.get("weight_decay", 0.0)) < 0:
         raise ValueError("training.weight_decay must be non-negative.")
-    if float(training.get("focal_gamma", 0.0)) < 0:
-        raise ValueError("training.focal_gamma must be non-negative.")
+    if float(training.get("lambda_step", 0.0)) <= 0:
+        raise ValueError("training.lambda_step must be positive.")
     if training.get("gradient_clip_norm") is not None and float(training.get("gradient_clip_norm")) <= 0:
         raise ValueError("training.gradient_clip_norm must be positive when provided.")
     if int(training.get("early_stop_patience", 0)) < 0:

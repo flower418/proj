@@ -65,7 +65,7 @@ def test_segment_closure_detection():
     )
 
 
-def test_restart_improves_residual():
+def test_refresh_triplet_improves_residual():
     np.random.seed(3)
     A = np.random.randn(8, 8) + 1j * np.random.randn(8, 8)
     z = 0.25 + 0.15j
@@ -77,15 +77,15 @@ def test_restart_improves_residual():
     v_bad /= np.linalg.norm(v_bad)
     M = z * np.eye(A.shape[0], dtype=np.complex128) - A
     residual_before = np.linalg.norm(M @ v_bad - epsilon * u_bad)
-    _, u_restart, v_restart = tracker.exact_svd_restart(z)
-    residual_after = np.linalg.norm(M @ v_restart - epsilon * u_restart)
+    _, u_refresh, v_refresh = tracker.refresh_triplet(z)
+    residual_after = np.linalg.norm(M @ v_refresh - epsilon * u_refresh)
     assert residual_after <= residual_before
 
 
-def test_restart_step_advances_trajectory():
-    class AlwaysRestartController:
+def test_step_only_controller_advances_trajectory():
+    class ConstantController:
         def predict(self, _features):
-            return 1e-2, True
+            return 1e-2
 
     np.random.seed(4)
     A = np.random.randn(6, 6) + 1j * np.random.randn(6, 6)
@@ -95,11 +95,12 @@ def test_restart_step_advances_trajectory():
         A=A,
         epsilon=epsilon,
         ode_system=ManifoldODE(A, epsilon),
-        controller=AlwaysRestartController(),
+        controller=ConstantController(),
     )
     result = tracker.track(z0=z0, max_steps=2)
-    assert len(result["restart_indices"]) >= 1
+    assert len(result["trajectory"]) >= 2
     assert np.abs(result["trajectory"][1] - result["trajectory"][0]) > 0.0
+    assert "projection_indices" in result
 
 
 def test_tracker_closes_from_point_sigma_start():

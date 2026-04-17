@@ -62,10 +62,9 @@ class PseudospectrumDataset(Dataset):
         data = np.load(data_path)
         features = np.asarray(data["features"], dtype=np.float32)
         ds_expert = np.asarray(data["ds_expert"], dtype=np.float32)
-        y_restart = np.asarray(data["y_restart"], dtype=np.float32)
 
-        if not (len(features) == len(ds_expert) == len(y_restart)):
-            raise ValueError("Dataset arrays features, ds_expert, y_restart must have the same length.")
+        if len(features) != len(ds_expert):
+            raise ValueError("Dataset arrays features and ds_expert must have the same length.")
 
         if split == "all":
             indices = np.arange(len(features), dtype=np.int64)
@@ -82,7 +81,6 @@ class PseudospectrumDataset(Dataset):
         self.indices = indices
         self.features = features[indices]
         self.ds_expert = ds_expert[indices]
-        self.y_restart = y_restart[indices]
 
     def __len__(self) -> int:
         return int(len(self.indices))
@@ -93,7 +91,6 @@ class PseudospectrumDataset(Dataset):
         return {
             "features": torch.tensor(self.features[idx], dtype=torch.float32),
             "ds_expert": torch.tensor(self.ds_expert[idx], dtype=torch.float32),
-            "y_restart": torch.tensor(self.y_restart[idx], dtype=torch.float32),
         }
 
 
@@ -134,14 +131,12 @@ def inspect_dataset(data_dir: str | Path, dataset_name: str | None = None) -> di
 
     features = np.asarray(data["features"], dtype=np.float32)
     ds_expert = np.asarray(data["ds_expert"], dtype=np.float32)
-    y_restart = np.asarray(data["y_restart"], dtype=np.float32)
 
     summary = {
         "data_file": str(data_path),
         "split_file": str(split_path),
         "num_samples": int(len(features)),
         "feature_dim": int(features.shape[1]) if features.ndim == 2 else None,
-        "restart_ratio": float(np.mean(y_restart)) if len(y_restart) > 0 else 0.0,
         "step_size_min": float(np.min(ds_expert)) if len(ds_expert) > 0 else 0.0,
         "step_size_max": float(np.max(ds_expert)) if len(ds_expert) > 0 else 0.0,
         "split_sizes": {

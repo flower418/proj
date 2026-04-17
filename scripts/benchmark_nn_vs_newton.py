@@ -35,7 +35,6 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=16000)
     parser.add_argument("--nn-min-step-size", type=float, default=None)
-    parser.add_argument("--restart-threshold", type=float, default=0.9)
     parser.add_argument("--baseline-initial-step-size", type=float, default=1e-2)
     parser.add_argument("--baseline-min-step-size", type=float, default=1e-6)
     parser.add_argument("--baseline-max-step-size", type=float, default=1e-1)
@@ -51,7 +50,7 @@ def load_controller(checkpoint_path: str, config: dict) -> NNController:
     controller = build_controller_from_checkpoint(
         checkpoint,
         config["controller"],
-        input_dim=int(config["controller"].get("input_dim", 7)),
+        input_dim=int(config["controller"].get("input_dim", 8)),
     )
     controller.load_state_dict(checkpoint["model_state_dict"])
     controller.eval()
@@ -98,7 +97,6 @@ def run_nn_benchmark(
     config: dict,
     max_steps: int,
     nn_min_step_size: float | None,
-    restart_threshold: float,
     summary_path: Path,
 ) -> dict:
     solver = PseudoinverseSolver(
@@ -111,7 +109,6 @@ def run_nn_benchmark(
         controller,
         min_step_size=float(nn_min_step_size if nn_min_step_size is not None else config["controller"]["step_size_min"]),
         max_step_size=config["controller"].get("step_size_max"),
-        restart_threshold=float(restart_threshold),
     )
 
     tracker = ContourTracker(
@@ -133,7 +130,6 @@ def run_nn_benchmark(
         {
             "elapsed_seconds": elapsed,
             "total_time_seconds": elapsed,
-            "num_restarts": int(len(result.get("restart_indices", []))),
             "num_projections": int(len(result.get("projection_indices", []))),
         }
     )
@@ -337,6 +333,8 @@ def save_comparison_plot(
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=160, bbox_inches="tight")
     plt.close(fig)
+
+
 def main():
     args = parse_args()
     output_dir = Path(args.output_dir)
@@ -364,7 +362,6 @@ def main():
             config=config,
             max_steps=args.max_steps,
             nn_min_step_size=args.nn_min_step_size,
-            restart_threshold=args.restart_threshold,
             summary_path=run_logger.log_dir / "nn" / "summary.json",
         )
         run_logger.log(f"nn {nn_run['elapsed_seconds']:.3f}s")
@@ -436,7 +433,6 @@ def main():
             "matrix_type": matrix_type,
             "seed": args.seed,
             "sampling_strategy": "random_point_sigma",
-            "restart_threshold": float(args.restart_threshold),
             "epsilon": float(epsilon),
             "epsilon_compute_seconds": epsilon_compute_seconds,
             "random_point": [float(np.real(z_random)), float(np.imag(z_random))],

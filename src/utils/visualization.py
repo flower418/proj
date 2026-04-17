@@ -59,7 +59,6 @@ def plot_pseudospectrum_background(
 
 def plot_trajectory(
     trajectory: np.ndarray,
-    restart_indices: Optional[list] = None,
     step_sizes: Optional[np.ndarray] = None,
     A: Optional[np.ndarray] = None,
     epsilon: Optional[float] = None,
@@ -67,7 +66,7 @@ def plot_trajectory(
     title: Optional[str] = None,
     save_path: Optional[str] = None,
 ):
-    """Visualize contour tracking with optional restart markers and step-size heatmap."""
+    """Visualize contour tracking with optional step-size heatmap."""
     ax = ax or plt.gca()
     traj_array = np.asarray(trajectory, dtype=np.complex128)
 
@@ -111,21 +110,6 @@ def plot_trajectory(
 
     ax.scatter(np.real(traj_array[0]), np.imag(traj_array[0]), c="green", s=130, marker="o", label="Start", zorder=6, edgecolors="black", linewidths=0.6)
     ax.scatter(np.real(traj_array[-1]), np.imag(traj_array[-1]), c="red", s=110, marker="s", label="End", zorder=6, edgecolors="black", linewidths=0.6)
-
-    if restart_indices:
-        clipped = [idx for idx in restart_indices if 0 <= idx < len(traj_array)]
-        if clipped:
-            restart_points = traj_array[clipped]
-            ax.scatter(
-                np.real(restart_points),
-                np.imag(restart_points),
-                c="orange",
-                s=110,
-                marker="x",
-                linewidths=2,
-                label="SVD Restart",
-                zorder=7,
-            )
 
     ax.set_xlabel("Re(z)")
     ax.set_ylabel("Im(z)")
@@ -175,24 +159,24 @@ def plot_training_summary(history: list, save_path: str):
     axes[0, 0].grid(True, alpha=0.3)
 
     train_step = [h["train"]["step_loss"] for h in history]
-    train_restart = [h["train"]["restart_loss"] for h in history]
-    axes[0, 1].plot(epochs, train_step, "g-", label="Step Loss", linewidth=2)
-    axes[0, 1].plot(epochs, train_restart, "m-", label="Restart Loss", linewidth=2)
+    val_step = [h["val"]["step_loss"] for h in history]
+    axes[0, 1].plot(epochs, train_step, "g-", label="Train Step Loss", linewidth=2)
+    axes[0, 1].plot(epochs, val_step, "m-", label="Val Step Loss", linewidth=2)
     axes[0, 1].set_xlabel("Epoch")
     axes[0, 1].set_ylabel("Loss")
-    axes[0, 1].set_title("Component Loss")
+    axes[0, 1].set_title("Step Loss")
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
 
-    if history and "accuracy" in history[0]["val"]:
-        val_acc = [h["val"]["accuracy"] for h in history]
-        val_f1 = [h["val"]["f1"] for h in history]
-        axes[1, 0].plot(epochs, val_acc, "b-o", label="Accuracy", linewidth=2)
-        axes[1, 0].plot(epochs, val_f1, "r-s", label="F1 Score", linewidth=2)
+    if history and "step_size_r2" in history[0]["val"]:
+        val_r2 = [h["val"].get("step_size_r2", 0.0) for h in history]
+        val_mae = [h["val"].get("step_size_mae", 0.0) for h in history]
+        axes[1, 0].plot(epochs, val_r2, "b-o", label="Step R2", linewidth=2)
+        axes[1, 0].plot(epochs, val_mae, "r-s", label="Step MAE", linewidth=2)
         axes[1, 0].legend()
     axes[1, 0].set_xlabel("Epoch")
     axes[1, 0].set_ylabel("Score")
-    axes[1, 0].set_title("Validation Metrics")
+    axes[1, 0].set_title("Validation Step Metrics")
     axes[1, 0].grid(True, alpha=0.3)
 
     learning_rates = [h.get("learning_rate", 1e-3) for h in history]

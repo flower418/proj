@@ -95,8 +95,6 @@ class StepDiagnosticsCollector:
     total_ds: float = 0.0
     min_ds: float = float("inf")
     max_ds: float = 0.0
-    num_restart_signals: int = 0
-    num_applied_restarts: int = 0
     num_projections: int = 0
     num_backtracked_steps: int = 0
     total_backtracks: int = 0
@@ -106,8 +104,6 @@ class StepDiagnosticsCollector:
     total_raw_sigma_error: float = 0.0
     max_raw_sigma_error: float = 0.0
     num_approx_triplet_skips: int = 0
-    total_restart_prob: float = 0.0
-    restart_prob_count: int = 0
 
     def observe(self, info: dict[str, Any]) -> None:
         self.num_steps += 1
@@ -119,10 +115,6 @@ class StepDiagnosticsCollector:
         self.min_ds = min(self.min_ds, ds)
         self.max_ds = max(self.max_ds, ds)
 
-        if bool(info.get("need_restart", False)):
-            self.num_restart_signals += 1
-        if bool(info.get("applied_restart", False)):
-            self.num_applied_restarts += 1
         if bool(info.get("applied_projection", False)):
             self.num_projections += 1
 
@@ -141,11 +133,6 @@ class StepDiagnosticsCollector:
         if str(info.get("triplet_refresh_mode", "")) == "approx_skip":
             self.num_approx_triplet_skips += 1
 
-        controller_info = info.get("controller_info")
-        if isinstance(controller_info, dict) and controller_info.get("restart_prob") is not None:
-            self.total_restart_prob += float(controller_info["restart_prob"])
-            self.restart_prob_count += 1
-
     def summary(self) -> dict[str, Any]:
         if self.num_steps == 0:
             return {"label": self.label, "num_steps": 0}
@@ -156,10 +143,6 @@ class StepDiagnosticsCollector:
             "mean_accepted_step_size": float(self.total_ds / self.num_steps),
             "min_accepted_step_size": float(self.min_ds),
             "max_accepted_step_size": float(self.max_ds),
-            "num_restart_signals": int(self.num_restart_signals),
-            "restart_signal_rate": float(self.num_restart_signals / self.num_steps),
-            "num_applied_restarts": int(self.num_applied_restarts),
-            "applied_restart_rate": float(self.num_applied_restarts / self.num_steps),
             "num_projections": int(self.num_projections),
             "projection_rate": float(self.num_projections / self.num_steps),
             "num_backtracked_steps": int(self.num_backtracked_steps),
@@ -171,7 +154,6 @@ class StepDiagnosticsCollector:
             "max_raw_sigma_error": float(self.max_raw_sigma_error),
             "num_approx_triplet_skips": int(self.num_approx_triplet_skips),
             "approx_triplet_skip_rate": float(self.num_approx_triplet_skips / self.num_steps),
-            "mean_restart_prob": float(self.total_restart_prob / self.restart_prob_count) if self.restart_prob_count > 0 else None,
         }
 
 

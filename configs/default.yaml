@@ -12,10 +12,9 @@ solver:
 tracker:
   max_steps: 4000
   closure_tol: 1.0e-3
-  restart_drift_threshold: 1.0e-4
 
 controller:
-  input_dim: 14
+  input_dim: 8
   hidden_dims: [128, 128, 64]
   dropout: 0.05
   norm_type: layernorm
@@ -30,9 +29,6 @@ training:
   weight_decay: 1.0e-5
   epochs: 100
   lambda_step: 1.0
-  lambda_restart: 1.0
-  alpha_restart: 0.75
-  focal_gamma: 1.5
   gradient_clip_norm: 1.0
   noise_std: 0.01
   scheduler_factor: 0.5

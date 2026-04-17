@@ -12,7 +12,6 @@ import _bootstrap  # noqa: F401
 from src.core.contour_tracker import FAST_TANGENT_TRACKER_KWARGS, ContourTracker
 from src.core.manifold_ode import ManifoldODE
 from src.core.pseudoinverse import PseudoinverseSolver
-from src.nn.controller import NNController
 from src.nn.controller import build_controller_from_checkpoint
 from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.config import load_yaml_config
@@ -50,7 +49,6 @@ def parse_args():
     parser.add_argument("--log-dir", default=None, help="Directory for runtime logs. Defaults near the output files.")
     parser.add_argument("--print-every", type=int, default=1, help="Print one step log every k steps. All steps are still saved to JSONL.")
     parser.add_argument("--quiet", action="store_true", help="Disable step-by-step console diagnostics while still saving logs to files.")
-    parser.add_argument("--restart-threshold", type=float, default=0.9, help="Controller restart probability threshold during inference.")
     return parser.parse_args()
 
 
@@ -128,7 +126,7 @@ def main():
             base_controller = build_controller_from_checkpoint(
                 checkpoint,
                 config["controller"],
-                input_dim=int(config["controller"].get("input_dim", 7)),
+                input_dim=int(config["controller"].get("input_dim", 8)),
             )
             base_controller.load_state_dict(checkpoint["model_state_dict"])
             base_controller.eval()
@@ -136,7 +134,6 @@ def main():
                 base_controller,
                 min_step_size=float(config["controller"]["step_size_min"]),
                 max_step_size=config["controller"].get("step_size_max"),
-                restart_threshold=float(args.restart_threshold),
             )
 
         collector = StepDiagnosticsCollector(label="run_tracking")
@@ -168,7 +165,6 @@ def main():
             plot_path.parent.mkdir(parents=True, exist_ok=True)
             plot_trajectory(
                 trajectory=result["trajectory"],
-                restart_indices=result["restart_indices"],
                 step_sizes=result["step_sizes"],
                 A=A,
                 epsilon=epsilon,
@@ -177,7 +173,6 @@ def main():
             )
         summary = {
             "tracked_points": int(len(result["trajectory"])),
-            "num_restarts": int(len(result["restart_indices"])),
             "num_projections": int(len(result.get("projection_indices", []))),
             "closure_error": closure_error,
             "closed": bool(result.get("closed", False)),
@@ -201,7 +196,6 @@ def main():
             "step_log_path": str(run_logger.log_dir / "tracking_steps.jsonl"),
             "diagnostics_path": str(diagnostics_path),
             "diagnostics": diagnostics,
-            "restart_threshold": float(args.restart_threshold),
         }
         if args.result_out is not None:
             out_path = Path(args.result_out)
@@ -210,7 +204,7 @@ def main():
                 json.dump(summary, fh, indent=2)
         run_logger.log(
             f"tracking finished closed={int(summary['closed'])} points={summary['tracked_points']} "
-            f"restarts={summary['num_restarts']} projections={summary['num_projections']}"
+            f"projections={summary['num_projections']}"
         )
         print(json.dumps(summary, indent=2))
 
