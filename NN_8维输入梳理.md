@@ -1,150 +1,137 @@
-# NN 8维输入梳理（当前代码版本）
+# NN 8 维输入梳理（当前代码版）
 
-当前代码已经把控制器输入统一为 **8 维**。
+当前控制器真正吃到的是 **8 维输入**。
 
-对应实现位置：
+对应代码位置：
 
-- 特征提取：`src/nn/features.py`
-- 追踪器拼接输入：`src/core/contour_tracker.py`
-- 默认配置：`configs/default.yaml`
+- `src/nn/features.py`
+- `src/core/contour_tracker.py`
+- `src/train/dagger_augmentation.py`
+
+这里最重要的结论只有两条：
+
+1. **网络实际输入就是这 8 维，没有别的隐藏输入**
+2. **这 8 维全部会被用到，其他量最多只用于 tracker / 日志 / 闭合判断**
 
 ---
 
-## 1. 当前真正送进网络的 8 维输入
+## 1. 归一化函数
 
-输入由两部分组成：
+前 7 维里的连续量都会经过 `_log_normalize(...)`：
 
-- 6 个基础几何特征
-- 2 个控制上下文特征
+\[
+\mathrm{lognorm}(x;a,b)=\mathrm{clip}\left(2\cdot\frac{\log_{10}(\max(x,10^a))-a}{b-a}-1,-1,1\right)
+\]
 
-按代码中的顺序分别是：
+所以网络看到的并不是原始物理量，而是压到 `[-1, 1]` 附近的数值。
 
-1. `|sigma_approx - epsilon|`
-2. `||Mv - epsilon u||`
-3. `|u^*v|`
-4. `|epsilon|`
-5. `matrix_scale`
-6. `|z| / matrix_scale`
-7. `prev_ds`
-8. `prev_applied_projection`
+---
+
+## 2. 当前真正送进网络的 8 维输入
+
+| 维度 | 原始语义量 | 代码中的实际变换 | 是否进入网络 | 作用 |
+|---|---|---|---|---|
+| 1 | `|sigma_approx - epsilon|` | `lognorm(x; -12, 0)` | 是 | 当前点离 contour 的近似偏差 |
+| 2 | `||Mv - epsilon u||` | `lognorm(x; -12, 0)` | 是 | 当前 triplet 残差 |
+| 3 | `|u^*v|` | `lognorm(x; -6, 0)` | 是 | 几何病态程度 |
+| 4 | `|epsilon|` | `lognorm(x; -12, 2)` | 是 | contour 层级尺度 |
+| 5 | `matrix_scale = ||A||_F / sqrt(n)` | `lognorm(x; -6, 3)` | 是 | 矩阵整体尺度 |
+| 6 | `|z| / matrix_scale` | `lognorm(x; -6, 3)` | 是 | 当前点的相对位置尺度 |
+| 7 | `prev_ds` | `lognorm(x; -8, -1)` | 是 | 上一步的步长历史 |
+| 8 | `prev_applied_projection` | `0` 或 `1` | 是 | 上一步是否发生投影 |
 
 其中：
 
 - `M = zI - A`
 - `sigma_approx = |u^*Mv|`
-- `matrix_scale = ||A||_F / sqrt(n)`
 
 ---
 
-## 2. 这 8 维里，哪些是真正有用的
+## 3. 哪些量真的会影响 MLP
 
-### A. 漂移 / 可靠性相关
+答案很直接：
 
-这三维直接决定当前状态还能不能继续放心走大步：
+- **上表 8 维，全部会进入 MLP**
+- **没有第 9 维、第 10 维，也没有额外 head 的隐式输入**
 
-1. `|sigma_approx - epsilon|`
-2. `||Mv - epsilon u||`
-3. `|u^*v|`
-
-作用分别是：
-
-- 判断当前点离 contour 偏了多少
-- 判断当前 triplet 一致性好不好
-- 判断局部几何是否接近病态
-
-这三维是**最核心**的一组。
-
-### B. 任务 / 尺度相关
-
-这三维告诉网络当前问题的尺度背景：
-
-4. `|epsilon|`
-5. `matrix_scale`
-6. `|z| / matrix_scale`
-
-作用是：
-
-- 区分不同 `epsilon` 等高线的尺度
-- 区分不同矩阵的整体尺度
-- 告诉网络当前点位于谱区域的大致位置
-
-这三维对跨矩阵泛化很重要。
-
-### C. 控制上下文相关
-
-最后两维是最简单但很实用的历史反馈：
-
-7. `prev_ds`
-8. `prev_applied_projection`
-
-作用是：
-
-- 让步长变化更连续，不要抖动太大
-- 告诉网络上一步是不是已经走得太激进
-
-这两维虽然便宜，但对控制稳定性非常有帮助。
+`NNController` 的 `input_dim` 默认就是 `8`，`configs/default.yaml` 里也是 `8`。
 
 ---
 
-## 3. 哪些已经被删掉，不再使用
+## 4. 哪些量不进入网络，但仍然在全链路里有用
 
-下面这些旧特征已经不再进入当前模型：
+下面这些量在当前代码里确实会被用到，但**不是 MLP 输入**。
 
-1. `u` 范数偏差
-2. `v` 范数偏差
-3. 相位变化
-4. 上一次线性求解器迭代数
-5. 其他和旧版控制分支耦合、信息量弱的上下文字段
+### 4.1 用于推理时的自适应包装
 
-删除它们的原因很简单：
+`AdaptiveInferenceController.observe_step(...)` 会用：
 
-- 有些量长期接近常数
-- 有些量噪声大但稳定贡献小
-- 有些量在 fast tangent 主线上几乎不提供额外信息
+- `raw_sigma_error`
+- `projection_distance`
+- `tangent_turn`
+- `applied_projection`
+- `ds`
 
-所以当前 8 维保留的是**真正稳定参与步长决策**的部分。
+这些量用于动态收紧或放松步长 ceiling。
+
+### 4.2 用于闭合判断
+
+`ContourTracker.check_closure(...)` 会用：
+
+- `path_length`
+- `max_distance_from_start`
+- `winding_angle`
+- `last_step_size`
+- `z_prev`
+
+这些量只服务于“这条 contour 是否已经闭合”。
+
+### 4.3 用于日志和诊断
+
+step callback / JSON 日志里还会记录：
+
+- `raw_ds`
+- `sigma`
+- `projection_mode`
+- `triplet_refresh_mode`
+- `triplet_residual`
+- `steps_since_exact_triplet_refresh`
+
+这些也不进入网络。
 
 ---
 
-## 4. 这 8 维可以怎么理解
+## 5. 这 8 维怎么理解
 
-现在这 8 维可以压缩成一句话：
+可以把它们分成三组：
 
-- 当前 triplet 是否可信
-- 当前任务和位置处在什么尺度上
-- 上一步控制是否过激
+### A. 当前状态是否可靠
 
-也就是：
+- `|sigma_approx - epsilon|`
+- `||Mv - epsilon u||`
+- `|u^*v|`
 
-- **漂移程度**
-- **几何可靠性**
-- **任务尺度**
-- **当前位置**
-- **控制历史**
+### B. 当前任务和位置处在什么尺度上
 
-这比旧版本特征集合更干净，也更符合当前代码真实运行方式。
+- `|epsilon|`
+- `matrix_scale`
+- `|z| / matrix_scale`
 
----
+### C. 上一步控制反馈是什么
 
-## 5. 一个实现上的提醒
+- `prev_ds`
+- `prev_applied_projection`
 
-旧 checkpoint 如果是按更高维输入训练出来的，那么和当前 8 维输入**不兼容**。
+所以网络学到的并不是“整个矩阵长什么样”，而是：
 
-也就是说：
-
-- 旧模型不能直接拿来跑当前版本
-- 需要重新生成数据或重新训练控制器
+> 当前局部状态稳不稳、尺度大不大、上一步是不是已经走得太激进。
 
 ---
 
 ## 6. 一句话总结
 
-当前 8 维输入只保留了对“步长控制”持续有效的信息：
+当前代码里：
 
-- 看漂不漂
-- 看几何稳不稳
-- 看任务尺度
-- 看当前位置
-- 看上一步控制反馈
-
-这就是当前代码里真正被网络用到的全部输入。
+- **真正喂给网络的只有这 8 维**
+- **这 8 维全部有效**
+- **其他量要么用于 tracker 的后处理，要么用于闭合判断和日志，不会进入 MLP**

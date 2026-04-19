@@ -1,5 +1,7 @@
 # 伪谱曲线追踪算法 (Pseudospectrum Curve Tracing) 实现指南
 
+> 说明：这个文件记录的是论文/传统 predictor-corrector 的参考算法，不对应当前仓库实现。当前实现请看 `README.md`、`NN_8维输入梳理.md` 和 `算法完整流程与单步计算全过程.md`。
+
 ## 1. 核心数学公式推导（面向代码实现）
 
 我们的目标是追踪复平面上的等高线：$f(z) = \sigma_{min}(zI - A) - \epsilon = 0$。

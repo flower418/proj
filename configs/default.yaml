@@ -4,11 +4,6 @@ ode:
   min_step_size: 1.0e-6
   max_step_size: 0.1
 
-solver:
-  method: minres
-  tol: 1.0e-8
-  max_iter: 500
-
 tracker:
   max_steps: 4000
   closure_tol: 1.0e-3

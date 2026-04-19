@@ -1,11 +1,4 @@
-# 神经增强子空间追踪算法
-
-这个项目当前采用的是**纯步长控制**版本：
-
-- 白盒几何负责给出沿等高线的推进方向
-- 神经网络只预测下一步步长 `ds`
-- 不再保留 restart 分支
-- 推理主链已收缩为单次接受结构
+# 神经增强伪谱等高线追踪
 
 目标任务是追踪矩阵 `A` 的 `epsilon`-伪谱等高线：
 
@@ -13,21 +6,29 @@
 \sigma_{\min}(zI-A)=\epsilon
 \]
 
+当前仓库的主线非常明确：
+
+- **方向**：白盒几何直接给出切向方向
+- **步长**：神经网络只预测下一步 `ds`
+- **执行器**：`ContourTracker` 负责真正 rollout，并在需要时做投影或精确刷新
+
+也就是说，当前实现是一个 **step-size controller + tangent tracker** 系统。
+
 ---
 
-## 当前推荐工作流
+## 1. 当前推荐工作流
 
 主流程只有三步：
 
-1. `scripts/generate_large_dataset.py` 生成离线数据集
+1. `scripts/generate_large_dataset.py` 生成离线数据
 2. `scripts/train_from_dataset.py` 训练步长控制器
 3. `scripts/run_tracking.py` / `scripts/benchmark_nn_vs_newton.py` 做推理和对比
 
 ---
 
-## 快速开始
+## 2. 快速开始
 
-### 1. 安装环境
+### 2.1 安装环境
 
 ```bash
 conda create -n proj python=3.12 -y
@@ -35,7 +36,7 @@ conda activate proj
 pip install -r requirements.txt
 ```
 
-### 2. 生成训练数据
+### 2.2 生成训练数据
 
 ```bash
 python -u scripts/generate_large_dataset.py \
@@ -49,15 +50,13 @@ python -u scripts/generate_large_dataset.py \
     --seed 0
 ```
 
-### 3. 检查数据集
+### 2.3 检查数据集
 
 ```bash
 python src/data/dataset.py --data-dir data/my_data
 ```
 
-当前控制器输入维度是 `8`。
-
-### 4. 训练控制器
+### 2.4 训练控制器
 
 ```bash
 python scripts/train_from_dataset.py \
@@ -68,7 +67,7 @@ python scripts/train_from_dataset.py \
     --device cuda
 ```
 
-### 5. 对自己的矩阵做追踪
+### 2.5 对自己的矩阵做追踪
 
 ```bash
 python scripts/run_tracking.py \
@@ -79,7 +78,9 @@ python scripts/run_tracking.py \
     --epsilon 0.1
 ```
 
-### 6. 与传统 Newton predictor-corrector 做对比
+如果不提供 `--checkpoint`，`run_tracking.py` 会退化成**固定步长 tangent tracker**，仍然使用同一条白盒几何链路，只是步长由固定常数给出。
+
+### 2.6 与传统 Newton predictor-corrector 做对比
 
 ```bash
 python scripts/benchmark_nn_vs_newton.py \
@@ -89,7 +90,7 @@ python scripts/benchmark_nn_vs_newton.py \
 
 ---
 
-## 当前项目结构
+## 3. 当前项目结构
 
 ```text
 proj/
@@ -103,75 +104,133 @@ proj/
 ├── src/
 ├── NN_8维输入梳理.md
 ├── DATASET_EXPLANATION.md
+├── idea.md
 └── 算法完整流程与单步计算全过程.md
 ```
 
 ---
 
-## 当前算法结构
+## 4. 当前算法结构
 
-### 1. 推理主链
+### 4.1 推理主链
 
-推理时真正运行的是 `src/core/contour_tracker.py` 里的 tangent tracker：
+真正跑推理的是 `src/core/contour_tracker.py` 里的 `ContourTracker`：
 
-- 当前状态是 `(z, u, v)`
-- 切向方向由 `v^*u` 的白盒几何公式直接给出
+- 当前状态是 `(z, u, v, prev_ds, prev_applied_projection)`
+- 切向方向由 `v^*u` 的白盒公式直接给出
 - 网络只决定 `ds`
-- tracker 负责近似接受、延迟投影、局部投影和必要时的精确刷新
+- tracker 负责：
+  - 近似 triplet 快路径
+  - deferred accept
+  - local projection
+  - exact SVD refresh
+  - radial/global projection
 
-### 2. 控制器输入
+### 4.2 控制器输入
 
-当前输入总共 `8` 维：
+控制器输入总共 **8 维**。
 
-- 6 个局部几何特征
-- 2 个控制上下文特征
+其中前 6 维来自局部几何，后 2 维来自控制上下文。注意：网络真正接收的是这些量的**归一化版本**，不是原始物理量本身。
 
-详细见 `NN_8维输入梳理.md`。
+详细见：`NN_8维输入梳理.md`
 
-### 3. 控制器输出
+### 4.3 控制器输出
 
 网络只输出一个量：
 
 - `ds`：下一步步长
 
-### 4. 专家数据
+在默认配置下，`NNController` 会把输出限制在 `[step_size_min, step_size_max]` 区间内；推理时外面还有 `AdaptiveInferenceController` 做额外的动态 ceiling 控制。
 
-训练标签来自高精度专家策略：
+### 4.4 专家数据
 
-- 专家推进：full triplet RK4 + 局部/全局投影
-- 标签：只保留 `ds_expert`
-- 增强：`DAgger`
+训练标签来自 `src/train/expert_solver.py`：
+
+- 专家推进：full triplet RK4
+- 纠偏：local projection / radial projection
+- 标签：`ds_expert`
+- 数据分布对齐：teacher-forced tracker + DAgger
 
 ---
 
-## 为什么这个版本仍然有效
+## 5. 代码里一条完整链路是什么
 
-一个容易产生误解的点是：
+### 数据生成链
 
-> 传统算法慢，是因为要频繁做 SVD；而切向公式本身很便宜。你的方法如果还是会做 SVD，为什么还能更快？
+- `scripts/generate_large_dataset.py`
+- `src/train/expert_solver.py`
+- `src/train/dagger_augmentation.py`
 
-关键不在于“把单次 SVD 变快”，而在于**减少昂贵操作出现的频率，并减少总 rollout 步数**。
+流程：
 
-当前实现真正节省时间的地方有三层：
+1. 随机生成矩阵 `A`
+2. 随机采样复平面点 `z_random`
+3. 计算 `epsilon = sigma_min(z_random I - A)`
+4. 专家给出 `ds_expert`
+5. teacher-forced tracker 用同构 rollout 记录 `(features, ds_expert)`
+6. DAgger 再补充偏离状态的恢复样本
 
-1. **方向本来就便宜**
-   - 切向方向由当前 `(u,v)` 直接给出
-   - 这部分不需要学习
+### 训练链
 
-2. **网络学习的是步长控制**
-   - 平滑区域走大步
-   - 风险区域自动保守
-   - 同一条 contour 往往能用更少步数走完
+- `scripts/train_from_dataset.py`
+- `src/nn/controller.py`
+- `src/nn/loss.py`
 
-3. **tracker 会尽量推迟昂贵刷新**
-   - 先尝试近似 triplet 判定
-   - 必要时才做 exact SVD 或 projection
-   - 因而总 wall-clock 可以下降
+流程：
 
-所以收益来源不是：
+1. 读入 8 维 `features`
+2. MLP 输出 `ds_pred`
+3. 用 `log(ds_pred)` 和 `log(ds_expert)` 做 MSE
+4. 保存 checkpoint 和训练日志
 
-- “网络替代了 SVD”
+### 推理链
 
-而是：
+- `scripts/run_tracking.py`
+- `src/core/contour_tracker.py`
+- `src/nn/inference_controller.py`
 
-- “网络减少了你不得不做昂贵校正的频率，并减少了总步数”
+流程：
+
+1. 初始化 `(z0, u0, v0)`
+2. 提取 8 维特征
+3. 网络预测 `ds`
+4. `AdaptiveInferenceController` 做步长稳定化
+5. `ContourTracker` 执行一小步
+6. 更新路径几何量并判断闭合
+
+---
+
+## 6. 为什么这个版本仍然可能更快
+
+传统算法慢，核心通常不在切向公式本身，而在**精确 SVD / Newton 校正触发得太频繁**。
+
+当前实现的收益主要来自三点：
+
+1. **方向本来就是便宜的白盒量**
+   - 切向方向直接由当前 `(u,v)` 给出
+
+2. **网络学习的是“什么时候敢走大步”**
+   - 平滑区更激进
+   - 风险区更保守
+   - 同一条 contour 常常能用更少 accepted steps 走完
+
+3. **tracker 会优先走便宜路径**
+   - 先试 approximate triplet
+   - 再试 deferred accept / local projection
+   - 只有必要时才升级到 exact SVD 或 radial projection
+
+所以收益不在于“把单次 SVD 变快”，而在于：
+
+- **减少昂贵刷新出现的频率**
+- **减少整条 rollout 的总步数**
+- **降低整体 wall-clock**
+
+---
+
+## 7. 进一步阅读
+
+- `NN_8维输入梳理.md`：8 维输入的精确定义与哪些量真正进入网络
+- `DATASET_EXPLANATION.md`：数据生成、字段和切分方式
+- `算法完整流程与单步计算全过程.md`：从代码出发梳理完整链路和单步细节
+- `idea.md`：适合组会或口头汇报的简化说明稿
+- `classical_code.md`：论文/传统 predictor-corrector 参考稿，不代表当前仓库实现

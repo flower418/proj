@@ -24,7 +24,7 @@ from src.utils.run_logging import RunLogger, format_newton_step, format_nn_step
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Benchmark NN+ODE contour tracking against a Newton predictor-corrector baseline on the same random matrix and point."
+        description="Benchmark the NN tangent tracker against a Newton predictor-corrector baseline on the same random matrix and point."
     )
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--checkpoint", required=True)
@@ -223,7 +223,7 @@ def save_comparison_plot(
         linewidth=2.8,
         linestyle="-",
         alpha=0.90,
-        label="NN + ODE",
+        label="NN tracker",
         zorder=6,
     )
     nn_line.set_path_effects(
@@ -283,14 +283,14 @@ def save_comparison_plot(
     ax.set_xlabel("Re(z)")
     ax.set_ylabel("Im(z)")
     ax.set_title(
-        f"NN + ODE vs Newton Predictor-Corrector\nmatrix={matrix_type}, epsilon={epsilon:.4g}",
+        f"NN tangent tracker vs Newton Predictor-Corrector\nmatrix={matrix_type}, epsilon={epsilon:.4g}",
         loc="left",
         fontsize=11,
         pad=18,
     )
     ax.grid(True, alpha=0.3)
     time_lines = [
-        f"NN + ODE: {nn_elapsed:.3f}s",
+        f"NN tracker: {nn_elapsed:.3f}s",
         f"Newton PC: {baseline_elapsed:.3f}s",
         f"NN closed: {int(bool(nn_result.get('closed', False)))}",
         f"Newton closed: {int(bool(baseline_result.get('closed', False)))}",
@@ -408,7 +408,7 @@ def main():
         )
 
         summary = {
-            "algorithm": "nn_plus_ode_vs_newton_predictor_corrector",
+            "algorithm": "nn_tangent_tracker_vs_newton_predictor_corrector",
             "checkpoint": args.checkpoint,
             "matrix_path": str(matrix_out),
             "plot_path": str(plot_out),
@@ -428,7 +428,7 @@ def main():
             "random_point": [float(np.real(z_random)), float(np.imag(z_random))],
             "start_point": [float(np.real(z0)), float(np.imag(z0))],
             "nearest_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
-            "nn_plus_ode": nn_summary,
+            "nn_tangent_tracker": nn_summary,
             "newton_predictor_corrector": baseline_summary,
             "comparison": comparison,
         }

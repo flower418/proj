@@ -1,55 +1,56 @@
 # 服务器实验教程
 
-这份教程只保留当前真实可用的主流程：
+这份教程只保留当前仓库真实可用的主流程：
 
 1. 建环境
-2. 生成大规模离线数据
+2. 跑数据生成
 3. 检查数据
 4. 训练模型
-5. 跑 NN vs Newton 对比
+5. 跑 benchmark
 6. 对自己的矩阵做推理
+
+---
 
 ## 1. 建环境
 
 ```bash
-conda create -n pseudospectrum python=3.10 -y
-conda activate pseudospectrum
+conda create -n proj python=3.12 -y
+conda activate proj
 pip install -r requirements.txt
 ```
 
-可选检查：
+建议先确认：
 
 ```bash
-python -m pytest tests -v
+python -c "import numpy, scipy, torch; print('env ok')"
 ```
 
-## 2. 生成大规模数据
+---
 
-现在训练数据统一使用：
+## 2. 跑数据生成
 
-- `scripts/generate_large_dataset.py`
-- 随机矩阵类型
-- 随机复平面点
-- `epsilon = sigma_min(zI - A)`
-
-当前默认支持的矩阵类型为：
-
-- `random_complex`
-- `random_hermitian`
-- `random_real`
-- `ill_conditioned`
-- `random_normal`
-- `banded_nonnormal`
-- `low_rank_plus_noise`
-- `jordan_perturbed`
-- `block_structured`
-
-### 正式实验示例
-
-如果你要做正式训练数据生成，可以从下面这条开始：
+### 2.1 先在前台试一小轮
 
 ```bash
 python -u scripts/generate_large_dataset.py \
+    --target-samples 20000 \
+    --matrix-sizes 30 50 80 \
+    --trajectories-per-type 4 \
+    --max-steps 200 \
+    --dagger-factor 2 \
+    --output-dir data/warmup20k \
+    --save-every 5000 \
+    --seed 0 \
+    --log-dir logs/warmup20k
+```
+
+### 2.2 正式跑大数据
+
+如果你想直接在服务器挂着跑，推荐用：
+
+```bash
+mkdir -p data/prod1m logs/prod1m
+nohup python -u scripts/generate_large_dataset.py \
     --target-samples 1000000 \
     --matrix-sizes 30 50 80 100 128 \
     --trajectories-per-type 6 \
@@ -57,32 +58,35 @@ python -u scripts/generate_large_dataset.py \
     --dagger-factor 2 \
     --output-dir data/prod1m \
     --save-every 50000 \
-    --seed 0
+    --seed 0 \
+    --log-dir logs/prod1m \
+    > logs/prod1m/generate.out 2>&1 &
 ```
 
-说明：
+查看进度：
 
-- `python -u` 很重要，服务器上可以持续看到进度
-- `target_samples` 是下限，不是严格上限
-- 脚本会随机抽矩阵类型，并循环你给出的尺寸列表
-- 每到 `save_every` 的增量会保存一次 partial 数据
+```bash
+tail -f logs/prod1m/generate.out
+```
 
-### 生成后会得到什么
+脚本还会额外写入：
 
-目录里至少会有：
+- `logs/prod1m/.../run.log`
+- `logs/prod1m/.../progress.jsonl`
+- `logs/prod1m/.../generation_summary.json`
+
+### 2.3 会产出什么
+
+完整生成后，`data/prod1m/` 下通常会看到：
 
 - `dataset_full.npz`
 - `dataset_full_splits.npz`
 - `dataset_splits.npz`
 - `dataset_stats.json`
-- `logs/.../run_config.json`
-- `logs/.../progress.jsonl`
-- `logs/.../generation_summary.json`
+- `partial_<N>.npz`（如果触发了阶段性保存）
+- `partial_<N>_splits.npz`（如果触发了阶段性保存）
 
-如果中途触发阶段性保存，还会有：
-
-- `partial_<N>.npz`
-- `partial_<N>_splits.npz`
+---
 
 ## 3. 检查数据
 
@@ -96,21 +100,19 @@ python src/data/dataset.py --data-dir data/prod1m
 - 划分文件路径
 - 总样本数
 - 特征维度
-- 重启样本比例
+- 步长最小值 / 最大值
 - train / val / test 样本数
 
-注意：
+当前控制器输入维度是 **8**。
 
-- 当前特征维度是 `14`
-- 划分优先按 `trajectory_id` 分组，而不是纯样本级随机切分
+---
 
 ## 4. 训练模型
 
-当前训练只使用 `configs/default.yaml`。
-不再有单独的 `configs/training.yaml`。
+训练脚本使用 `configs/default.yaml` 的 `controller` 和 `training` 配置，并支持命令行覆盖。
 
 ```bash
-python scripts/train_from_dataset.py \
+python -u scripts/train_from_dataset.py \
     --data-dir data/prod1m \
     --experiment-name prod1m_model \
     --epochs 80 \
@@ -121,21 +123,23 @@ python scripts/train_from_dataset.py \
     --activation silu \
     --dropout 0.05 \
     --head-hidden-dim 64 \
-    --step-size-min 1e-6 \
+    --step-size-min 1e-4 \
     --step-size-max 1e-1 \
     --lambda-step 1.0 \
-    --lambda-restart 3.0 \
-    --gradient-clip-norm 1.0
+    --gradient-clip-norm 1.0 \
+    --device cuda
 ```
 
-输出文件：
+输出通常在：
 
 - `models/prod1m_model/best_model.pt`
 - `models/prod1m_model/training_history.json`
 - `models/prod1m_model/test_metrics.json`
-- `logs/prod1m_model/training_summary.png`
+- `logs/prod1m_model/...`
 
-## 5. 跑 NN vs Newton 对比
+---
+
+## 5. 跑 NN tracker vs Newton benchmark
 
 ```bash
 python scripts/benchmark_nn_vs_newton.py \
@@ -146,8 +150,6 @@ python scripts/benchmark_nn_vs_newton.py \
     --output-dir results/bench_seed0
 ```
 
-这个 benchmark 默认串行执行，先跑 `NN + ODE`，再跑 `Newton PC`。这样 `NN` 这一条会独占 CPU，单路速度最快。
-
 输出文件：
 
 - `results/bench_seed0/comparison_plot.png`
@@ -156,7 +158,12 @@ python scripts/benchmark_nn_vs_newton.py \
 - `results/bench_seed0/random_matrix.npy`
 - `results/bench_seed0/logs/.../nn/summary.json`
 
-benchmark 不再额外写 baseline summary 或 step 日志，只保留 NN 的 summary。
+这份 benchmark 会在同一个随机矩阵、同一个随机点上比较：
+
+- 当前 `NN tangent tracker`
+- 传统 `Newton predictor-corrector`
+
+---
 
 ## 6. 对自己的矩阵做推理
 
@@ -169,4 +176,35 @@ python scripts/run_tracking.py \
     --result-out results/my_matrix/tracking_summary.json
 ```
 
-如果你不提供 `--checkpoint`，它会退化成固定步长 ODE 跟踪。
+如果你想只跑白盒链路，也可以不提供 checkpoint：
+
+```bash
+python scripts/run_tracking.py \
+    --matrix-path path/to/matrix.npy \
+    --epsilon 0.1 \
+    --plot-out results/my_matrix/fixed_step_tracker.png
+```
+
+这时脚本会使用**固定步长 tangent tracker**。
+
+---
+
+## 7. 服务器上最实用的三个命令
+
+### 看数据生成日志
+
+```bash
+tail -f logs/prod1m/generate.out
+```
+
+### 看最新 run 目录
+
+```bash
+ls -lt logs/prod1m | head
+```
+
+### 看最新 summary
+
+```bash
+find logs/prod1m -name generation_summary.json | sort | tail -n 1 | xargs cat
+```

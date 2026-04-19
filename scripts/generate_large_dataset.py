@@ -26,12 +26,10 @@ def generate_trajectory(
     epsilon: float,
     z0: complex,
     max_steps: int = 200,
-    solver_config: dict = None,
     step_progress_callback=None,
 ) -> List[Dict]:
     """生成单条更接近推理分布的 teacher-forced 轨迹。"""
-    solver = PseudoinverseSolver(**(solver_config or {}))
-    expert = ExpertSolver(A=A, epsilon=epsilon, solver=solver)
+    expert = ExpertSolver(A=A, epsilon=epsilon, solver=PseudoinverseSolver())
     tracker = ContourTracker(
         A=A,
         epsilon=epsilon,
@@ -192,6 +190,30 @@ def _make_dagger_progress_printer(run_logger: RunLogger | None):
     return _printer
 
 
+def _extend_records_with_metadata(
+    all_records: List[Dict],
+    records: List[Dict],
+    *,
+    matrix_type: str,
+    matrix_size: int,
+    matrix_id: str,
+    trajectory_id: str,
+    epsilon: float,
+    source: str | None = None,
+) -> int:
+    for record in records:
+        enriched = dict(record)
+        enriched["matrix_type"] = matrix_type
+        enriched["matrix_size"] = int(matrix_size)
+        enriched["matrix_id"] = matrix_id
+        enriched["trajectory_id"] = trajectory_id
+        enriched["epsilon"] = float(epsilon)
+        if source is not None:
+            enriched["source"] = source
+        all_records.append(enriched)
+    return len(records)
+
+
 def generate_diverse_dataset(
     target_samples: int = 10000,
     matrix_sizes: List[int] = None,
@@ -267,15 +289,16 @@ def generate_diverse_dataset(
                         f"    Teacher 完成：{len(trajectory)} 步，开始 DAgger={dagger_factor}"
                     )
                     trajectory_id = f"{matrix_id}_s{start_idx:03d}"
-
-                    for record in trajectory:
-                        record["matrix_type"] = matrix_type
-                        record["matrix_size"] = n
-                        record["matrix_id"] = matrix_id
-                        record["trajectory_id"] = trajectory_id
-                        record["epsilon"] = float(epsilon)
-                        all_records.append(record)
-                        stats["total_samples"] += 1
+                    raw_count = _extend_records_with_metadata(
+                        all_records,
+                        trajectory,
+                        matrix_type=matrix_type,
+                        matrix_size=n,
+                        matrix_id=matrix_id,
+                        trajectory_id=trajectory_id,
+                        epsilon=float(epsilon),
+                    )
+                    stats["total_samples"] += raw_count
 
                     if dagger_factor > 0:
                         dagger_progress_printer = _make_dagger_progress_printer(run_logger)
@@ -287,26 +310,30 @@ def generate_diverse_dataset(
                             progress_callback=dagger_progress_printer,
                         )
                         _log_message(run_logger, f"    DAgger 完成：{len(augmented)} 条增强样本")
-                        for record in augmented:
-                            record["matrix_type"] = matrix_type
-                            record["matrix_size"] = n
-                            record["matrix_id"] = matrix_id
-                            record["trajectory_id"] = trajectory_id
-                            record["source"] = "dagger"
-                            record["epsilon"] = float(epsilon)
-                            all_records.append(record)
-                            stats["total_samples"] += 1
+                        augmented_count = _extend_records_with_metadata(
+                            all_records,
+                            augmented,
+                            matrix_type=matrix_type,
+                            matrix_size=n,
+                            matrix_id=matrix_id,
+                            trajectory_id=trajectory_id,
+                            epsilon=float(epsilon),
+                            source="dagger",
+                        )
+                        stats["total_samples"] += augmented_count
                     else:
                         augmented = []
+                        augmented_count = 0
                         _log_message(run_logger, "    DAgger 跳过：0 条增强样本")
 
                     if stats["feature_dim"] is None and trajectory:
                         stats["feature_dim"] = int(np.asarray(trajectory[0]["features"]).shape[-1])
 
                     stats["trajectories"] += 1
-                    stats["matrix_types"][matrix_type] = int(stats["matrix_types"].get(matrix_type, 0) + len(trajectory) + len(augmented))
+                    total_added = raw_count + augmented_count
+                    stats["matrix_types"][matrix_type] = int(stats["matrix_types"].get(matrix_type, 0) + total_added)
                     size_key = str(n)
-                    stats["matrix_sizes"][size_key] = int(stats["matrix_sizes"].get(size_key, 0) + len(trajectory) + len(augmented))
+                    stats["matrix_sizes"][size_key] = int(stats["matrix_sizes"].get(size_key, 0) + total_added)
                     if run_logger is not None:
                         run_logger.append_jsonl(
                             "progress.jsonl",
@@ -320,8 +347,8 @@ def generate_diverse_dataset(
                                 "random_point": [float(np.real(z_random)), float(np.imag(z_random))],
                                 "start_point": [float(np.real(z0)), float(np.imag(z0))],
                                 "nearest_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
-                                "raw_samples": len(trajectory),
-                                "augmented_samples": len(augmented),
+                                "raw_samples": raw_count,
+                                "augmented_samples": augmented_count,
                                 "total_samples": stats["total_samples"],
                             },
                         )
