@@ -5,6 +5,7 @@ from typing import Tuple
 import numpy as np
 
 from .pseudoinverse import PseudoinverseSolver
+from src.utils.tangent import estimate_tangent_from_sigma_field
 
 
 class ManifoldODE:
@@ -22,9 +23,9 @@ class ManifoldODE:
     def compute_dz_ds(self, z: complex, u: np.ndarray, v: np.ndarray) -> complex:
         gamma = np.vdot(v, u)
         magnitude = np.abs(gamma)
-        if magnitude < 1e-15:
-            raise ValueError("v^*u is too small; contour tangent is ill-defined.")
-        return 1j * gamma / magnitude
+        if magnitude >= 1e-12:
+            return 1j * gamma / magnitude
+        return estimate_tangent_from_sigma_field(self.A, z, self.epsilon)
 
     def compute_dv_ds(self, z: complex, u: np.ndarray, v: np.ndarray, dz_ds: complex) -> np.ndarray:
         M = self._get_M(z)

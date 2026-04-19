@@ -9,6 +9,7 @@ from src.nn.features import assemble_controller_features, extract_features
 from src.utils.contour_init import project_to_contour, sigma_min_at
 from src.utils.local_projection import project_to_contour_by_local_normal
 from src.utils.svd import smallest_singular_triplet
+from src.utils.tangent import estimate_tangent_from_sigma_field
 
 
 @dataclass
@@ -64,13 +65,30 @@ class ContourTracker:
         _, u, v = self.svd_solver(self.A, z)
         return z, u, v
 
-    @staticmethod
-    def _compute_tangent_direction(u: np.ndarray, v: np.ndarray) -> complex:
+    def _compute_tangent_direction(
+        self,
+        u: np.ndarray,
+        v: np.ndarray,
+        z: complex | None = None,
+        preferred_direction: complex | None = None,
+    ) -> complex:
         gamma = np.vdot(v, u)
         magnitude = np.abs(gamma)
-        if magnitude < 1e-15:
+        if magnitude >= 1e-12:
+            tangent = 1j * gamma / magnitude
+            if preferred_direction is not None and abs(preferred_direction) > 1e-12:
+                preferred = complex(preferred_direction) / abs(preferred_direction)
+                if float(np.real(np.conj(preferred) * tangent)) < 0.0:
+                    tangent = -tangent
+            return tangent
+        if z is None:
             raise ValueError('v^*u is too small; contour tangent is ill-defined.')
-        return 1j * gamma / magnitude
+        return estimate_tangent_from_sigma_field(
+            self.A,
+            z,
+            self.epsilon,
+            preferred_direction=preferred_direction,
+        )
 
     def extract_state_features(self, z, u, v, prev_state=None) -> np.ndarray:
         base_features = extract_features(
@@ -171,8 +189,14 @@ class ContourTracker:
         u: np.ndarray,
         v: np.ndarray,
         ds: float,
+        preferred_tangent: complex | None = None,
     ) -> tuple[complex, np.ndarray, np.ndarray]:
-        dz_ds = self._compute_tangent_direction(u, v)
+        dz_ds = self._compute_tangent_direction(
+            u,
+            v,
+            z=z,
+            preferred_direction=preferred_tangent,
+        )
         return z + ds * dz_ds, u.copy(), v.copy()
 
     def _approximate_triplet_metrics(
@@ -203,6 +227,7 @@ class ContourTracker:
         ds: float,
         deferred_projection_streak: int = 0,
         steps_since_exact_triplet_refresh: int = 0,
+        preferred_tangent: complex | None = None,
     ) -> Tuple[complex, np.ndarray, np.ndarray, float, dict]:
         ds_step = max(float(ds), self.min_step_size)
         z_candidate, u_candidate, v_candidate = self._predict_candidate_state(
@@ -210,6 +235,7 @@ class ContourTracker:
             u=u,
             v=v,
             ds=ds_step,
+            preferred_tangent=preferred_tangent,
         )
 
         can_use_approx_triplet = (
@@ -428,9 +454,9 @@ class ContourTracker:
         deferred_projection_streak = 0
         steps_since_exact_triplet_refresh = 0
         try:
-            prev_tangent_angle = float(np.angle(self._compute_tangent_direction(u, v)))
+            prev_tangent = self._compute_tangent_direction(u, v, z=z0)
         except Exception:
-            prev_tangent_angle = None
+            prev_tangent = None
 
         for step in range(max_steps):
             z_prev = state.z
@@ -455,6 +481,7 @@ class ContourTracker:
                 ds=ds,
                 deferred_projection_streak=deferred_projection_streak,
                 steps_since_exact_triplet_refresh=steps_since_exact_triplet_refresh,
+                preferred_tangent=prev_tangent,
             )
             sigma_after_correction = float(step_diagnostics['sigma'])
             sigma_error_after_correction = float(step_diagnostics['sigma_error'])
@@ -488,12 +515,17 @@ class ContourTracker:
 
             tangent_turn = 0.0
             try:
-                current_tangent_angle = float(np.angle(self._compute_tangent_direction(u, v)))
+                current_tangent = self._compute_tangent_direction(
+                    u,
+                    v,
+                    z=z,
+                    preferred_direction=prev_tangent,
+                )
             except Exception:
-                current_tangent_angle = prev_tangent_angle
-            if prev_tangent_angle is not None and current_tangent_angle is not None:
-                tangent_turn = float(abs(np.angle(np.exp(1j * (current_tangent_angle - prev_tangent_angle)))))
-            prev_tangent_angle = current_tangent_angle
+                current_tangent = prev_tangent
+            if prev_tangent is not None and current_tangent is not None:
+                tangent_turn = float(abs(np.angle(np.exp(1j * (np.angle(current_tangent) - np.angle(prev_tangent))))))
+            prev_tangent = current_tangent
 
             state = TrackerState(
                 z=z,

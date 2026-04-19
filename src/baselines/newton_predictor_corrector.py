@@ -6,6 +6,7 @@ import numpy as np
 
 from src.utils.contour_init import project_to_contour, sigma_min_at
 from src.utils.svd import smallest_singular_triplet
+from src.utils.tangent import estimate_tangent_from_sigma_field
 
 
 @dataclass
@@ -99,13 +100,28 @@ class NewtonPredictorCorrectorTracker:
         v0 = v0 / max(np.linalg.norm(v0), 1e-15)
         return z0, u0, v0, float(sigma0)
 
-    @staticmethod
-    def _tangent_direction(u: np.ndarray, v: np.ndarray) -> complex:
+    def _tangent_direction(
+        self,
+        z: complex,
+        u: np.ndarray,
+        v: np.ndarray,
+        preferred_direction: complex | None = None,
+    ) -> complex:
         gamma = np.vdot(v, u)
         gamma_norm = abs(gamma)
-        if gamma_norm < 1e-15:
-            raise ValueError("v^*u is too small; tangent direction is ill-defined.")
-        return 1j * gamma / gamma_norm
+        if gamma_norm >= 1e-12:
+            tangent = 1j * gamma / gamma_norm
+            if preferred_direction is not None and abs(preferred_direction) > 1e-12:
+                preferred = complex(preferred_direction) / abs(preferred_direction)
+                if float(np.real(np.conj(preferred) * tangent)) < 0.0:
+                    tangent = -tangent
+            return tangent
+        return estimate_tangent_from_sigma_field(
+            self.A,
+            z,
+            self.epsilon,
+            preferred_direction=preferred_direction,
+        )
 
     def _newton_correct(
         self,
@@ -200,9 +216,13 @@ class NewtonPredictorCorrectorTracker:
         closed = False
         step_size = self.initial_step_size
         failure_reason = None
+        try:
+            prev_tangent = self._tangent_direction(z, u, v)
+        except Exception:
+            prev_tangent = None
 
         for step in range(max_steps):
-            tangent = self._tangent_direction(u, v)
+            tangent = self._tangent_direction(z, u, v, preferred_direction=prev_tangent)
             accepted = None
             accepted_step = None
             accepted_halvings = None
@@ -281,6 +301,11 @@ class NewtonPredictorCorrectorTracker:
             ):
                 closed = True
                 break
+
+            try:
+                prev_tangent = self._tangent_direction(z, u, v, preferred_direction=tangent)
+            except Exception:
+                prev_tangent = tangent
 
             step_size = self._adapt_step_size(
                 current_step_size=accepted_step,
