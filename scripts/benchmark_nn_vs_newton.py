@@ -16,39 +16,57 @@ from src.baselines import NewtonPredictorCorrectorTracker
 from src.core.contour_tracker import ContourTracker
 from src.nn.controller import NNController, build_controller_from_checkpoint
 from src.nn.inference_controller import AdaptiveInferenceController
-from src.utils.config import load_yaml_config
 from src.utils.contour_compare import contour_distance_metrics
-from src.utils.demo_sampling import build_random_matrix, sample_random_contour_start
+from src.utils.contour_init import auto_select_near_eigen_contour
+from src.utils.demo_sampling import build_random_matrix
 from src.utils.run_logging import RunLogger, format_newton_step, format_nn_step
+
+
+DEFAULT_CONTROLLER_CONFIG = {
+    "input_dim": 6,
+    "hidden_dims": [128, 128, 64],
+    "dropout": 0.05,
+    "norm_type": "layernorm",
+    "activation": "silu",
+    "head_hidden_dim": 64,
+    "step_size_min": 1.0e-4,
+    "step_size_max": 0.1,
+}
+
+DEFAULT_TRACKER_FIXED_STEP_SIZE = 1.0e-2
+DEFAULT_TRACKER_MIN_STEP_SIZE = 1.0e-6
+DEFAULT_TRACKER_CLOSURE_TOL = 1.0e-3
+
+DEFAULT_BASELINE_INITIAL_STEP_SIZE = 1.0e-2
+DEFAULT_BASELINE_MIN_STEP_SIZE = 1.0e-6
+DEFAULT_BASELINE_MAX_STEP_SIZE = 1.0e-1
+DEFAULT_BASELINE_CORRECTOR_TOL = 1.0e-10
+DEFAULT_BASELINE_MAX_CORRECTOR_ITERS = 8
+DEFAULT_BASELINE_MAX_STEP_HALVINGS = 8
+
+DEFAULT_NEAR_EIGEN_GAP_RATIO = 0.12
+DEFAULT_NEAR_EIGEN_ANCHOR = "rightmost"
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Benchmark the NN tangent tracker against a Newton predictor-corrector baseline on the same random matrix and point."
+        description="Benchmark the NN tangent tracker against Newton predictor-corrector on the same near-eigen contour."
     )
-    parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output-dir", default="results/nn_vs_newton")
-    parser.add_argument("--matrix-size", type=int, default=20)
+    parser.add_argument("--matrix-size", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=16000)
-    parser.add_argument("--nn-min-step-size", type=float, default=None)
-    parser.add_argument("--baseline-initial-step-size", type=float, default=1e-2)
-    parser.add_argument("--baseline-min-step-size", type=float, default=1e-6)
-    parser.add_argument("--baseline-max-step-size", type=float, default=1e-1)
-    parser.add_argument("--baseline-corrector-tol", type=float, default=1e-10)
-    parser.add_argument("--baseline-max-corrector-iters", type=int, default=8)
-    parser.add_argument("--baseline-max-step-halvings", type=int, default=8)
     parser.add_argument("--log-dir", default=None, help="Directory for runtime logs. Defaults to <output-dir>/logs.")
     return parser.parse_args()
 
 
-def load_controller(checkpoint_path: str, config: dict) -> NNController:
+def load_controller(checkpoint_path: str) -> NNController:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     controller = build_controller_from_checkpoint(
         checkpoint,
-        config["controller"],
-        input_dim=int(config["controller"].get("input_dim", 6)),
+        DEFAULT_CONTROLLER_CONFIG,
+        input_dim=int(DEFAULT_CONTROLLER_CONFIG["input_dim"]),
     )
     controller.load_state_dict(checkpoint["model_state_dict"])
     controller.eval()
@@ -92,25 +110,23 @@ def run_nn_benchmark(
     epsilon: float,
     z0: complex,
     checkpoint: str,
-    config: dict,
     max_steps: int,
-    nn_min_step_size: float | None,
     summary_path: Path,
 ) -> dict:
-    controller = load_controller(checkpoint, config)
+    controller = load_controller(checkpoint)
     nn_controller = AdaptiveInferenceController(
         controller,
-        min_step_size=float(nn_min_step_size if nn_min_step_size is not None else config["controller"]["step_size_min"]),
-        max_step_size=config["controller"].get("step_size_max"),
+        min_step_size=float(getattr(controller, "step_size_min", DEFAULT_CONTROLLER_CONFIG["step_size_min"])),
+        max_step_size=getattr(controller, "step_size_max", DEFAULT_CONTROLLER_CONFIG["step_size_max"]),
     )
 
     tracker = ContourTracker(
         A=A,
         epsilon=epsilon,
         controller=nn_controller,
-        fixed_step_size=config["ode"]["initial_step_size"],
-        closure_tol=config["tracker"]["closure_tol"],
-        min_step_size=config["ode"]["min_step_size"],
+        fixed_step_size=DEFAULT_TRACKER_FIXED_STEP_SIZE,
+        closure_tol=DEFAULT_TRACKER_CLOSURE_TOL,
+        min_step_size=DEFAULT_TRACKER_MIN_STEP_SIZE,
     )
     step_callback = make_console_callback(format_nn_step, label="nn", print_every=20)
     t0 = time.perf_counter()
@@ -140,25 +156,18 @@ def run_newton_benchmark(
     A: np.ndarray,
     epsilon: float,
     z0: complex,
-    closure_tol: float,
     max_steps: int,
-    initial_step_size: float,
-    min_step_size: float,
-    max_step_size: float,
-    corrector_tol: float,
-    max_corrector_iters: int,
-    max_step_halvings: int,
 ) -> dict:
     tracker = NewtonPredictorCorrectorTracker(
         A=A,
         epsilon=epsilon,
-        initial_step_size=initial_step_size,
-        min_step_size=min_step_size,
-        max_step_size=max_step_size,
-        corrector_tol=corrector_tol,
-        max_corrector_iters=max_corrector_iters,
-        max_step_halvings=max_step_halvings,
-        closure_tol=closure_tol,
+        initial_step_size=DEFAULT_BASELINE_INITIAL_STEP_SIZE,
+        min_step_size=DEFAULT_BASELINE_MIN_STEP_SIZE,
+        max_step_size=DEFAULT_BASELINE_MAX_STEP_SIZE,
+        corrector_tol=DEFAULT_BASELINE_CORRECTOR_TOL,
+        max_corrector_iters=DEFAULT_BASELINE_MAX_CORRECTOR_ITERS,
+        max_step_halvings=DEFAULT_BASELINE_MAX_STEP_HALVINGS,
+        closure_tol=DEFAULT_TRACKER_CLOSURE_TOL,
     )
     step_callback = make_console_callback(format_newton_step, label="newton", print_every=50)
     t0 = time.perf_counter()
@@ -196,7 +205,7 @@ def sample_marker_points(trajectory: np.ndarray, count: int, phase: float = 0.0)
 def save_comparison_plot(
     A: np.ndarray,
     epsilon: float,
-    z_random: complex,
+    anchor_eigenvalue: complex,
     z0: complex,
     matrix_type: str,
     nn_result: dict,
@@ -273,9 +282,7 @@ def save_comparison_plot(
             pe.Normal(),
         ]
     )
-    ax.scatter(
-        np.real(z_random), np.imag(z_random), c="#2a9d8f", s=115, marker="X", edgecolors="black", linewidths=0.7, label="Random Point", zorder=10
-    )
+    ax.scatter(np.real(anchor_eigenvalue), np.imag(anchor_eigenvalue), c="#2a9d8f", s=92, marker="X", edgecolors="black", linewidths=0.7, label="Anchor eigenvalue", zorder=10)
     ax.scatter(np.real(z0), np.imag(z0), c="white", s=92, marker="o", edgecolors="black", linewidths=1.1, label="Start", zorder=10)
     ax.scatter(np.real(nn_traj[-1]), np.imag(nn_traj[-1]), c="#0f4c81", s=82, marker="s", edgecolors="white", linewidths=0.9, label="NN End", zorder=10)
     ax.scatter(np.real(base_traj[-1]), np.imag(base_traj[-1]), c="#d95f02", s=84, marker="D", edgecolors="white", linewidths=0.9, label="Newton End", zorder=10)
@@ -283,7 +290,7 @@ def save_comparison_plot(
     ax.set_xlabel("Re(z)")
     ax.set_ylabel("Im(z)")
     ax.set_title(
-        f"NN tangent tracker vs Newton Predictor-Corrector\nmatrix={matrix_type}, epsilon={epsilon:.4g}",
+        f"NN tangent tracker vs Newton Predictor-Corrector\nmatrix={matrix_type}, epsilon={epsilon:.4g}, near-eigen contour",
         loc="left",
         fontsize=11,
         pad=18,
@@ -332,14 +339,35 @@ def main():
     log_root = Path(args.log_dir) if args.log_dir is not None else output_dir / "logs"
 
     with RunLogger(log_root, run_name="benchmark_nn_vs_newton") as run_logger:
-        config = load_yaml_config(args.config)
-
-        run_logger.write_json("run_config.json", {"args": vars(args), "config": config})
+        run_logger.write_json(
+            "run_config.json",
+            {
+                "args": vars(args),
+                "defaults": {
+                    "controller": DEFAULT_CONTROLLER_CONFIG,
+                    "tracker_fixed_step_size": DEFAULT_TRACKER_FIXED_STEP_SIZE,
+                    "tracker_min_step_size": DEFAULT_TRACKER_MIN_STEP_SIZE,
+                    "tracker_closure_tol": DEFAULT_TRACKER_CLOSURE_TOL,
+                    "baseline_initial_step_size": DEFAULT_BASELINE_INITIAL_STEP_SIZE,
+                    "baseline_min_step_size": DEFAULT_BASELINE_MIN_STEP_SIZE,
+                    "baseline_max_step_size": DEFAULT_BASELINE_MAX_STEP_SIZE,
+                    "baseline_corrector_tol": DEFAULT_BASELINE_CORRECTOR_TOL,
+                    "baseline_max_corrector_iters": DEFAULT_BASELINE_MAX_CORRECTOR_ITERS,
+                    "baseline_max_step_halvings": DEFAULT_BASELINE_MAX_STEP_HALVINGS,
+                    "near_eigen_gap_ratio": DEFAULT_NEAR_EIGEN_GAP_RATIO,
+                    "near_eigen_anchor": DEFAULT_NEAR_EIGEN_ANCHOR,
+                },
+            },
+        )
 
         rng = np.random.default_rng(args.seed)
         prep_t0 = time.perf_counter()
         matrix_type, A = build_random_matrix(args.matrix_size, rng)
-        z0, epsilon, z_random, anchor = sample_random_contour_start(A=A, rng=rng)
+        z0, epsilon, anchor, start_radius = auto_select_near_eigen_contour(
+            A=A,
+            which=DEFAULT_NEAR_EIGEN_ANCHOR,
+            gap_ratio=DEFAULT_NEAR_EIGEN_GAP_RATIO,
+        )
         epsilon_compute_seconds = float(time.perf_counter() - prep_t0)
 
         run_logger.log("nn")
@@ -349,9 +377,7 @@ def main():
             epsilon=epsilon,
             z0=z0,
             checkpoint=args.checkpoint,
-            config=config,
             max_steps=args.max_steps,
-            nn_min_step_size=args.nn_min_step_size,
             summary_path=run_logger.log_dir / "nn" / "summary.json",
         )
         run_logger.log(f"nn {nn_run['elapsed_seconds']:.3f}s")
@@ -360,14 +386,7 @@ def main():
             A=A,
             epsilon=epsilon,
             z0=z0,
-            closure_tol=config["tracker"]["closure_tol"],
             max_steps=args.max_steps,
-            initial_step_size=args.baseline_initial_step_size,
-            min_step_size=args.baseline_min_step_size,
-            max_step_size=args.baseline_max_step_size,
-            corrector_tol=args.baseline_corrector_tol,
-            max_corrector_iters=args.baseline_max_corrector_iters,
-            max_step_halvings=args.baseline_max_step_halvings,
         )
         run_logger.log(f"newton {baseline_run['elapsed_seconds']:.3f}s")
         benchmark_elapsed = float(time.perf_counter() - benchmark_t0)
@@ -397,7 +416,7 @@ def main():
         save_comparison_plot(
             A=A,
             epsilon=epsilon,
-            z_random=z_random,
+            anchor_eigenvalue=anchor,
             z0=z0,
             matrix_type=matrix_type,
             nn_result=nn_result,
@@ -422,12 +441,14 @@ def main():
             "matrix_size": args.matrix_size,
             "matrix_type": matrix_type,
             "seed": args.seed,
-            "sampling_strategy": "random_point",
+            "sampling_strategy": "near_eigen",
+            "near_eigen_gap_ratio": DEFAULT_NEAR_EIGEN_GAP_RATIO,
+            "near_eigen_anchor": DEFAULT_NEAR_EIGEN_ANCHOR,
             "epsilon": float(epsilon),
             "epsilon_compute_seconds": epsilon_compute_seconds,
-            "random_point": [float(np.real(z_random)), float(np.imag(z_random))],
             "start_point": [float(np.real(z0)), float(np.imag(z0))],
             "nearest_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
+            "start_radius": float(start_radius),
             "nn_tangent_tracker": nn_summary,
             "newton_predictor_corrector": baseline_summary,
             "comparison": comparison,
