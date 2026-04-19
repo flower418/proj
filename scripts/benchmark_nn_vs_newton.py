@@ -17,8 +17,7 @@ from src.core.contour_tracker import ContourTracker
 from src.nn.controller import NNController, build_controller_from_checkpoint
 from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.contour_compare import contour_distance_metrics
-from src.utils.contour_init import auto_select_near_eigen_contour
-from src.utils.demo_sampling import build_random_matrix
+from src.utils.demo_sampling import build_visual_demo_matrix, sample_near_eigen_contour_start
 from src.utils.run_logging import RunLogger, format_newton_step, format_nn_step
 
 
@@ -44,7 +43,7 @@ DEFAULT_BASELINE_CORRECTOR_TOL = 1.0e-10
 DEFAULT_BASELINE_MAX_CORRECTOR_ITERS = 8
 DEFAULT_BASELINE_MAX_STEP_HALVINGS = 8
 
-DEFAULT_NEAR_EIGEN_GAP_RATIO = 0.12
+DEFAULT_NEAR_EIGEN_GAP_RATIO = 0.04
 DEFAULT_NEAR_EIGEN_ANCHOR = "rightmost"
 
 
@@ -362,12 +361,16 @@ def main():
 
         rng = np.random.default_rng(args.seed)
         prep_t0 = time.perf_counter()
-        matrix_type, A = build_random_matrix(args.matrix_size, rng)
-        z0, epsilon, anchor, start_radius = auto_select_near_eigen_contour(
+        matrix_type, A = build_visual_demo_matrix(args.matrix_size, rng)
+        z0, epsilon, _, anchor, sample_meta = sample_near_eigen_contour_start(
             A=A,
+            rng=rng,
             which=DEFAULT_NEAR_EIGEN_ANCHOR,
-            gap_ratio=DEFAULT_NEAR_EIGEN_GAP_RATIO,
+            gap_ratio_range=(DEFAULT_NEAR_EIGEN_GAP_RATIO, DEFAULT_NEAR_EIGEN_GAP_RATIO),
+            fallback_radius_ratio_range=(DEFAULT_NEAR_EIGEN_GAP_RATIO, DEFAULT_NEAR_EIGEN_GAP_RATIO),
         )
+        start_radius = float(sample_meta.get("sampling_radius", 0.0))
+        start_angle = sample_meta.get("sampling_angle")
         epsilon_compute_seconds = float(time.perf_counter() - prep_t0)
 
         run_logger.log("nn")
@@ -449,6 +452,7 @@ def main():
             "start_point": [float(np.real(z0)), float(np.imag(z0))],
             "nearest_eigenvalue": [float(np.real(anchor)), float(np.imag(anchor))],
             "start_radius": float(start_radius),
+            "start_angle": start_angle,
             "nn_tangent_tracker": nn_summary,
             "newton_predictor_corrector": baseline_summary,
             "comparison": comparison,

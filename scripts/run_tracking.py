@@ -12,17 +12,39 @@ import _bootstrap  # noqa: F401
 from src.core.contour_tracker import ContourTracker
 from src.nn.controller import build_controller_from_checkpoint
 from src.nn.inference_controller import AdaptiveInferenceController
-from src.utils.config import load_yaml_config
-from src.utils.contour_init import auto_select_contour_start, auto_select_near_eigen_contour, project_to_contour, sigma_min_at
+from src.utils.demo_sampling import build_visual_demo_matrix, sample_near_eigen_contour_start
+from src.utils.contour_init import auto_select_contour_start, project_to_contour, sigma_min_at
 from src.utils.run_logging import StepDiagnosticsCollector, RunLogger, format_nn_step, make_step_callback
 from src.utils.visualization import plot_trajectory
 
 
+DEFAULT_CONTROLLER_CONFIG = {
+    "input_dim": 6,
+    "hidden_dims": [128, 128, 64],
+    "dropout": 0.05,
+    "norm_type": "layernorm",
+    "activation": "silu",
+    "head_hidden_dim": 64,
+    "step_size_min": 1.0e-4,
+    "step_size_max": 0.1,
+}
+
+DEFAULT_ODE = {
+    "epsilon": 0.1,
+    "initial_step_size": 1.0e-2,
+    "min_step_size": 1.0e-6,
+}
+
+DEFAULT_TRACKER = {
+    "max_steps": 4000,
+    "closure_tol": 1.0e-3,
+}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Run contour tracking inference.")
-    parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--matrix-path", default=None, help="Path to .npy or .npz containing matrix A.")
-    parser.add_argument("--matrix-size", type=int, default=12, help="Only used together with --demo-random.")
+    parser.add_argument("--matrix-size", type=int, default=50, help="Only used together with --demo-random.")
     parser.add_argument("--demo-random", action="store_true", help="Use a random demo matrix instead of a supplied matrix.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=None)
@@ -47,13 +69,13 @@ def parse_args():
     parser.add_argument(
         "--near-eigen-contour",
         action="store_true",
-        help="For automatic start selection, choose a contour intentionally close to the selected anchor eigenvalue.",
+        help="Choose a contour defined by a random point near a selected anchor eigenvalue.",
     )
     parser.add_argument(
         "--near-eigen-gap-ratio",
         type=float,
-        default=0.18,
-        help="Target contour radius as a fraction of the nearest eigenvalue gap when --near-eigen-contour is enabled.",
+        default=0.04,
+        help="Radius as a fraction of the nearest eigenvalue gap when --near-eigen-contour is enabled.",
     )
     parser.add_argument("--log-dir", default=None, help="Directory for runtime logs. Defaults near the output files.")
     parser.add_argument("--print-every", type=int, default=1, help="Print one step log every k steps. All steps are still saved to JSONL.")
@@ -87,22 +109,33 @@ def main():
         log_root = Path("results/run_tracking/logs")
 
     with RunLogger(log_root, run_name="run_tracking") as run_logger:
-        config = load_yaml_config(args.config)
-        run_logger.write_json("run_config.json", {"args": vars(args), "config": config})
+        run_logger.write_json(
+            "run_config.json",
+            {
+                "args": vars(args),
+                "defaults": {
+                    "controller": DEFAULT_CONTROLLER_CONFIG,
+                    "ode": DEFAULT_ODE,
+                    "tracker": DEFAULT_TRACKER,
+                },
+            },
+        )
 
-        epsilon = float(args.epsilon if args.epsilon is not None else config["ode"]["epsilon"])
-        max_steps = int(args.max_steps if args.max_steps is not None else config["tracker"]["max_steps"])
+        epsilon = float(args.epsilon if args.epsilon is not None else DEFAULT_ODE["epsilon"])
+        max_steps = int(args.max_steps if args.max_steps is not None else DEFAULT_TRACKER["max_steps"])
         if args.matrix_path is None and not args.demo_random:
             raise ValueError("Provide --matrix-path for real inference, or use --demo-random for a toy random-matrix demo.")
-        np.random.seed(args.seed)
+        rng = np.random.default_rng(args.seed)
         if args.matrix_path is not None:
             A = np.asarray(load_matrix(args.matrix_path), dtype=np.complex128)
+            matrix_type = "user_matrix"
         else:
-            A = np.random.randn(args.matrix_size, args.matrix_size) + 1j * np.random.randn(args.matrix_size, args.matrix_size)
+            matrix_type, A = build_visual_demo_matrix(args.matrix_size, rng)
 
         start_mode = "auto"
         anchor_eigenvalue = None
         auto_start_radius = None
+        near_eigen_angle = None
         z_input = None
         sigma_at_input = None
         if args.z0_real is not None or args.z0_imag is not None:
@@ -114,12 +147,15 @@ def main():
             z0, sigma_at_start = project_to_contour(A, epsilon, z_input)
         else:
             if args.near_eigen_contour:
-                z0, epsilon, anchor_eigenvalue, auto_start_radius = auto_select_near_eigen_contour(
+                z0, epsilon, _, anchor_eigenvalue, sample_meta = sample_near_eigen_contour_start(
                     A,
+                    rng=rng,
                     which=args.auto_start,
-                    angle_offset=args.auto_angle_offset,
-                    gap_ratio=args.near_eigen_gap_ratio,
+                    gap_ratio_range=(args.near_eigen_gap_ratio, args.near_eigen_gap_ratio),
+                    fallback_radius_ratio_range=(args.near_eigen_gap_ratio, args.near_eigen_gap_ratio),
                 )
+                auto_start_radius = float(sample_meta.get("sampling_radius", 0.0))
+                near_eigen_angle = sample_meta.get("sampling_angle")
                 sigma_at_start = float(epsilon)
                 start_mode = "auto_near_eigen"
             else:
@@ -132,7 +168,7 @@ def main():
 
         run_logger.log(
             f"tracking start mode={start_mode} epsilon={epsilon:.6f} max_steps={max_steps} "
-            f"matrix_shape={A.shape} log_dir={run_logger.log_dir}"
+            f"matrix_shape={A.shape} matrix_type={matrix_type} log_dir={run_logger.log_dir}"
         )
 
         controller = None
@@ -140,15 +176,15 @@ def main():
             checkpoint = torch.load(args.checkpoint, map_location="cpu")
             base_controller = build_controller_from_checkpoint(
                 checkpoint,
-                config["controller"],
-                input_dim=int(config["controller"].get("input_dim", 6)),
+                DEFAULT_CONTROLLER_CONFIG,
+                input_dim=int(DEFAULT_CONTROLLER_CONFIG["input_dim"]),
             )
             base_controller.load_state_dict(checkpoint["model_state_dict"])
             base_controller.eval()
             controller = AdaptiveInferenceController(
                 base_controller,
-                min_step_size=float(config["controller"]["step_size_min"]),
-                max_step_size=config["controller"].get("step_size_max"),
+                min_step_size=float(DEFAULT_CONTROLLER_CONFIG["step_size_min"]),
+                max_step_size=DEFAULT_CONTROLLER_CONFIG.get("step_size_max"),
             )
 
         collector = StepDiagnosticsCollector(label="run_tracking")
@@ -164,8 +200,8 @@ def main():
             A=A,
             epsilon=epsilon,
             controller=controller,
-            fixed_step_size=config["ode"]["initial_step_size"],
-            closure_tol=config["tracker"]["closure_tol"],
+            fixed_step_size=DEFAULT_ODE["initial_step_size"],
+            closure_tol=DEFAULT_TRACKER["closure_tol"],
         )
         result = tracker.track(z0=z0, max_steps=max_steps, step_callback=step_callback)
         diagnostics = collector.summary()
@@ -193,6 +229,7 @@ def main():
             "winding_angle": float(result.get("winding_angle", 0.0)),
             "epsilon": epsilon,
             "max_steps": max_steps,
+            "matrix_type": matrix_type,
             "start_mode": start_mode,
             "input_point": None if z_input is None else [float(np.real(z_input)), float(np.imag(z_input))],
             "projected_start_point": [float(np.real(result["trajectory"][0])), float(np.imag(result["trajectory"][0]))],
@@ -205,6 +242,7 @@ def main():
             "near_eigen_contour": bool(args.near_eigen_contour),
             "near_eigen_gap_ratio": float(args.near_eigen_gap_ratio) if args.near_eigen_contour else None,
             "auto_start_radius": auto_start_radius,
+            "near_eigen_angle": near_eigen_angle,
             "mode": "user_matrix" if args.matrix_path is not None else "demo_random",
             "log_dir": str(run_logger.log_dir),
             "run_log_path": str(run_logger.run_log_path),

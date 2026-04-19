@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .contour_init import sigma_min_at
+from .contour_init import select_anchor_eigenvalue, sigma_min_at
 
 
 SUPPORTED_MATRIX_TYPES = (
@@ -15,6 +15,14 @@ SUPPORTED_MATRIX_TYPES = (
     "low_rank_plus_noise",
     "jordan_perturbed",
     "block_structured",
+)
+
+VISUAL_MATRIX_TYPES = (
+    "banded_nonnormal",
+    "jordan_perturbed",
+    "low_rank_plus_noise",
+    "block_structured",
+    "random_complex",
 )
 
 
@@ -104,6 +112,36 @@ def build_random_matrix(n: int, rng: np.random.Generator) -> tuple[str, np.ndarr
     return matrix_type, np.asarray(matrix, dtype=np.complex128)
 
 
+def _departure_from_normality(A: np.ndarray) -> float:
+    A = np.asarray(A, dtype=np.complex128)
+    AH = A.conj().T
+    commutator = A @ AH - AH @ A
+    scale = max(float(np.linalg.norm(A, ord="fro")) ** 2, 1e-12)
+    return float(np.linalg.norm(commutator, ord="fro") / scale)
+
+
+def build_visual_demo_matrix(
+    n: int,
+    rng: np.random.Generator,
+    num_candidates: int = 6,
+) -> tuple[str, np.ndarray]:
+    best_type = None
+    best_matrix = None
+    best_score = -float("inf")
+    candidate_count = max(int(num_candidates), 1)
+
+    for _ in range(candidate_count):
+        matrix_type = str(VISUAL_MATRIX_TYPES[int(rng.integers(len(VISUAL_MATRIX_TYPES)))])
+        matrix = np.asarray(getattr(MatrixGenerator, matrix_type)(n, rng), dtype=np.complex128)
+        score = _departure_from_normality(matrix)
+        if score > best_score:
+            best_score = score
+            best_type = matrix_type
+            best_matrix = matrix
+
+    return str(best_type), np.asarray(best_matrix, dtype=np.complex128)
+
+
 def _matrix_scale(A: np.ndarray) -> float:
     A = np.asarray(A, dtype=np.complex128)
     n = max(int(A.shape[0]), 1)
@@ -146,6 +184,7 @@ def sample_random_contour_start(
 def sample_near_eigen_contour_start(
     A: np.ndarray,
     rng: np.random.Generator,
+    which: str | None = None,
     gap_ratio_range: tuple[float, float] = (0.06, 0.22),
     fallback_radius_ratio_range: tuple[float, float] = (0.02, 0.12),
     min_radius_ratio: float = 1e-4,
@@ -154,7 +193,12 @@ def sample_near_eigen_contour_start(
 ) -> tuple[complex, float, complex, complex, dict]:
     A = np.asarray(A, dtype=np.complex128)
     eigvals = np.linalg.eigvals(A)
-    anchor = complex(eigvals[int(rng.integers(len(eigvals)))])
+    if which is None:
+        anchor = complex(eigvals[int(rng.integers(len(eigvals)))])
+        anchor_mode = "random_eigenvalue"
+    else:
+        anchor = complex(select_anchor_eigenvalue(A, which=which))
+        anchor_mode = str(which)
     nearest_gap = _nearest_eigen_gap(eigvals, anchor)
     matrix_scale = max(_matrix_scale(A), 1.0)
 
@@ -186,6 +230,8 @@ def sample_near_eigen_contour_start(
     return z_random, epsilon, z_random, anchor, {
         "sampling_mode": "near_eigen",
         "sampling_radius": float(radius),
+        "sampling_angle": float(angle),
+        "anchor_mode": anchor_mode,
     }
 
 
