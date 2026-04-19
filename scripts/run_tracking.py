@@ -13,7 +13,7 @@ from src.core.contour_tracker import ContourTracker
 from src.nn.controller import build_controller_from_checkpoint
 from src.nn.inference_controller import AdaptiveInferenceController
 from src.utils.config import load_yaml_config
-from src.utils.contour_init import auto_select_contour_start, project_to_contour, sigma_min_at
+from src.utils.contour_init import auto_select_contour_start, auto_select_near_eigen_contour, project_to_contour, sigma_min_at
 from src.utils.run_logging import StepDiagnosticsCollector, RunLogger, format_nn_step, make_step_callback
 from src.utils.visualization import plot_trajectory
 
@@ -43,6 +43,17 @@ def parse_args():
         type=float,
         default=0.0,
         help="Rotate the automatic start ray by this many radians.",
+    )
+    parser.add_argument(
+        "--near-eigen-contour",
+        action="store_true",
+        help="For automatic start selection, choose a contour intentionally close to the selected anchor eigenvalue.",
+    )
+    parser.add_argument(
+        "--near-eigen-gap-ratio",
+        type=float,
+        default=0.18,
+        help="Target contour radius as a fraction of the nearest eigenvalue gap when --near-eigen-contour is enabled.",
     )
     parser.add_argument("--log-dir", default=None, help="Directory for runtime logs. Defaults near the output files.")
     parser.add_argument("--print-every", type=int, default=1, help="Print one step log every k steps. All steps are still saved to JSONL.")
@@ -91,6 +102,7 @@ def main():
 
         start_mode = "auto"
         anchor_eigenvalue = None
+        auto_start_radius = None
         z_input = None
         sigma_at_input = None
         if args.z0_real is not None or args.z0_imag is not None:
@@ -101,12 +113,22 @@ def main():
             sigma_at_input = sigma_min_at(A, z_input)
             z0, sigma_at_start = project_to_contour(A, epsilon, z_input)
         else:
-            z0, sigma_at_start, anchor_eigenvalue = auto_select_contour_start(
-                A,
-                epsilon,
-                which=args.auto_start,
-                angle_offset=args.auto_angle_offset,
-            )
+            if args.near_eigen_contour:
+                z0, epsilon, anchor_eigenvalue, auto_start_radius = auto_select_near_eigen_contour(
+                    A,
+                    which=args.auto_start,
+                    angle_offset=args.auto_angle_offset,
+                    gap_ratio=args.near_eigen_gap_ratio,
+                )
+                sigma_at_start = float(epsilon)
+                start_mode = "auto_near_eigen"
+            else:
+                z0, sigma_at_start, anchor_eigenvalue = auto_select_contour_start(
+                    A,
+                    epsilon,
+                    which=args.auto_start,
+                    angle_offset=args.auto_angle_offset,
+                )
 
         run_logger.log(
             f"tracking start mode={start_mode} epsilon={epsilon:.6f} max_steps={max_steps} "
@@ -119,7 +141,7 @@ def main():
             base_controller = build_controller_from_checkpoint(
                 checkpoint,
                 config["controller"],
-                input_dim=int(config["controller"].get("input_dim", 8)),
+                input_dim=int(config["controller"].get("input_dim", 6)),
             )
             base_controller.load_state_dict(checkpoint["model_state_dict"])
             base_controller.eval()
@@ -178,8 +200,11 @@ def main():
             "sigma_at_input": sigma_at_input,
             "sigma_at_projected_start": sigma_at_start,
             "anchor_eigenvalue": None if anchor_eigenvalue is None else [float(np.real(anchor_eigenvalue)), float(np.imag(anchor_eigenvalue))],
-            "auto_start_mode": args.auto_start if start_mode == "auto" else None,
-            "auto_angle_offset": args.auto_angle_offset if start_mode == "auto" else None,
+            "auto_start_mode": args.auto_start if start_mode.startswith("auto") else None,
+            "auto_angle_offset": args.auto_angle_offset if start_mode.startswith("auto") else None,
+            "near_eigen_contour": bool(args.near_eigen_contour),
+            "near_eigen_gap_ratio": float(args.near_eigen_gap_ratio) if args.near_eigen_contour else None,
+            "auto_start_radius": auto_start_radius,
             "mode": "user_matrix" if args.matrix_path is not None else "demo_random",
             "log_dir": str(run_logger.log_dir),
             "run_log_path": str(run_logger.run_log_path),

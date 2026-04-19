@@ -36,6 +36,8 @@ def validate_config(config: Dict[str, Any]) -> None:
     ctrl_max = float(controller.get("step_size_max", max_step))
     if not (0.0 < ctrl_min <= ctrl_max):
         raise ValueError("controller step size bounds must satisfy 0 < min <= max.")
+    if int(controller.get("input_dim", 6)) != 6:
+        raise ValueError("controller.input_dim must be 6 in the simplified pipeline.")
     if controller.get("norm_type", "layernorm").lower() not in {"layernorm", "batchnorm"}:
         raise ValueError("controller.norm_type must be 'layernorm' or 'batchnorm'.")
     if controller.get("activation", "silu").lower() not in {"relu", "gelu", "silu"}:

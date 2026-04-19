@@ -86,8 +86,15 @@ def main():
 
     model = build_controller(
         controller_cfg,
-        input_dim=int(controller_cfg.get("input_dim", config["controller"].get("input_dim", 8))),
+        input_dim=int(controller_cfg.get("input_dim", config["controller"].get("input_dim", 6))),
     ).to(device)
+    dataset_feature_dim = int(train_loader.dataset.features.shape[1])
+    print(f"Feature dim: {dataset_feature_dim}")
+    if dataset_feature_dim != int(model.input_dim):
+        raise ValueError(
+            f"Dataset feature_dim={dataset_feature_dim}, but model input_dim={model.input_dim}. "
+            f"请先用当前代码重新生成数据集。"
+        )
 
     loss_fn = ControllerLoss(
         lambda_step=training_cfg["lambda_step"],

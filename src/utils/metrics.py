@@ -3,17 +3,6 @@ from __future__ import annotations
 import numpy as np
 
 
-def residual_norm(A: np.ndarray, z: complex, u: np.ndarray, v: np.ndarray, epsilon: float) -> float:
-    M = z * np.eye(A.shape[0], dtype=np.complex128) - A
-    return float(np.linalg.norm(M @ v - epsilon * u))
-
-
-def contour_closure_error(trajectory: np.ndarray) -> float:
-    if len(trajectory) < 2:
-        return 0.0
-    return float(np.abs(trajectory[-1] - trajectory[0]))
-
-
 def step_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     y_true = np.asarray(y_true, dtype=np.float64).reshape(-1)
     y_pred = np.asarray(y_pred, dtype=np.float64).reshape(-1)

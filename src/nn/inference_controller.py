@@ -47,7 +47,7 @@ class AdaptiveInferenceController:
         self.curvature_turn_threshold = max(float(curvature_turn_threshold), 0.0)
         self.curvature_penalty_streak = max(int(curvature_penalty_streak), 1)
         self.curvature_shrink_factor = min(max(float(curvature_shrink_factor), 0.1), 0.99)
-        self.input_dim = int(getattr(base_controller, 'input_dim', 8))
+        self.input_dim = int(getattr(base_controller, 'input_dim', 6))
         self.reset()
 
     def reset(self) -> None:

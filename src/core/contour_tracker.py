@@ -17,7 +17,6 @@ class TrackerState:
     u: np.ndarray
     v: np.ndarray
     prev_ds: float = 0.0
-    prev_applied_projection: bool = False
 
 
 class ContourTracker:
@@ -82,13 +81,11 @@ class ContourTracker:
             epsilon=self.epsilon,
         )
         controller_model = getattr(self.controller, 'base_controller', self.controller)
-        input_dim = int(getattr(controller_model, 'input_dim', len(base_features) + 2))
+        input_dim = int(getattr(controller_model, 'input_dim', len(base_features) + 1))
         prev_ds = 0.0 if prev_state is None else float(prev_state.prev_ds)
-        prev_applied_projection = False if prev_state is None else bool(prev_state.prev_applied_projection)
         return assemble_controller_features(
             base_features,
             prev_ds=prev_ds,
-            prev_applied_projection=prev_applied_projection,
             input_dim=input_dim,
         )
 
@@ -416,13 +413,11 @@ class ContourTracker:
             u=u,
             v=v,
             prev_ds=0.0,
-            prev_applied_projection=False,
         )
         trajectory = [z0]
         u_history = [u.copy()]
         v_history = [v.copy()]
         step_sizes = []
-        feature_history = []
         path_length = 0.0
         max_distance_from_start = 0.0
         closure_anchor = self._closure_anchor(z0)
@@ -440,7 +435,6 @@ class ContourTracker:
         for step in range(max_steps):
             z_prev = state.z
             features = self.extract_state_features(state.z, state.u, state.v, prev_state=state)
-            feature_history.append(features)
             if self.controller is not None:
                 if hasattr(self.controller, 'predict_with_info'):
                     ds, controller_info = self.controller.predict_with_info(features)
@@ -506,7 +500,6 @@ class ContourTracker:
                 u=u,
                 v=v,
                 prev_ds=float(accepted_ds),
-                prev_applied_projection=applied_projection,
             )
             trajectory.append(z)
             u_history.append(u.copy())
@@ -580,7 +573,6 @@ class ContourTracker:
             'u_history': u_history,
             'v_history': v_history,
             'step_sizes': step_sizes,
-            'feature_history': np.asarray(feature_history, dtype=np.float32),
             'closed': closed,
             'path_length': float(path_length),
             'max_distance_from_start': float(max_distance_from_start),

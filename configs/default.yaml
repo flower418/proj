@@ -9,7 +9,7 @@ tracker:
   closure_tol: 1.0e-3
 
 controller:
-  input_dim: 8
+  input_dim: 6
   hidden_dims: [128, 128, 64]
   dropout: 0.05
   norm_type: layernorm
@@ -25,7 +25,6 @@ training:
   epochs: 100
   lambda_step: 1.0
   gradient_clip_norm: 1.0
-  noise_std: 0.01
   scheduler_factor: 0.5
   scheduler_patience: 8
   early_stop_patience: 15

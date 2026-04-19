@@ -48,7 +48,7 @@ def load_controller(checkpoint_path: str, config: dict) -> NNController:
     controller = build_controller_from_checkpoint(
         checkpoint,
         config["controller"],
-        input_dim=int(config["controller"].get("input_dim", 8)),
+        input_dim=int(config["controller"].get("input_dim", 6)),
     )
     controller.load_state_dict(checkpoint["model_state_dict"])
     controller.eval()
@@ -422,7 +422,7 @@ def main():
             "matrix_size": args.matrix_size,
             "matrix_type": matrix_type,
             "seed": args.seed,
-            "sampling_strategy": "random_point_sigma",
+            "sampling_strategy": "random_point",
             "epsilon": float(epsilon),
             "epsilon_compute_seconds": epsilon_compute_seconds,
             "random_point": [float(np.real(z_random)), float(np.imag(z_random))],

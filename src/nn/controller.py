@@ -11,7 +11,7 @@ from torch import nn
 class NNController(nn.Module):
     def __init__(
         self,
-        input_dim: int = 8,
+        input_dim: int = 6,
         hidden_dims: Optional[List[int]] = None,
         dropout: float = 0.1,
         norm_type: str = "layernorm",
@@ -122,7 +122,7 @@ class NNController(nn.Module):
         return ds_value
 
 
-def build_controller(controller_config: Dict[str, Any], input_dim: int = 8) -> NNController:
+def build_controller(controller_config: Dict[str, Any], input_dim: int = 6) -> NNController:
     return NNController(
         input_dim=int(controller_config.get("input_dim", input_dim)),
         hidden_dims=list(controller_config.get("hidden_dims", [64, 64])),
@@ -138,7 +138,7 @@ def build_controller(controller_config: Dict[str, Any], input_dim: int = 8) -> N
 def build_controller_from_checkpoint(
     checkpoint: Dict[str, Any],
     controller_config: Dict[str, Any],
-    input_dim: int = 8,
+    input_dim: int = 6,
 ) -> NNController:
     merged_config = dict(controller_config)
     merged_config.update(checkpoint.get("model_config", {}))

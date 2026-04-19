@@ -13,6 +13,20 @@ def sigma_min_at(A: np.ndarray, z: complex) -> float:
     return float(sigma)
 
 
+def _matrix_scale(A: np.ndarray) -> float:
+    A = np.asarray(A, dtype=np.complex128)
+    n = max(int(A.shape[0]), 1)
+    return float(np.linalg.norm(A, ord="fro") / max(np.sqrt(float(n)), 1.0))
+
+
+def _nearest_eigen_gap(eigvals: np.ndarray, anchor: complex) -> float:
+    distances = np.abs(np.asarray(eigvals, dtype=np.complex128) - complex(anchor))
+    valid = distances > 1e-10
+    if not np.any(valid):
+        return float("inf")
+    return float(np.min(distances[valid]))
+
+
 def _root_on_ray(
     A: np.ndarray,
     epsilon: float,
@@ -88,6 +102,60 @@ def auto_select_contour_start(
         tol=tol,
     )
     return z0, sigma, center
+
+
+def auto_select_near_eigen_contour(
+    A: np.ndarray,
+    which: str = "rightmost",
+    angle_offset: float = 0.0,
+    gap_ratio: float = 0.18,
+    fallback_radius_ratio: float = 0.05,
+    min_radius_ratio: float = 1e-4,
+    epsilon_floor_ratio: float = 1e-8,
+) -> Tuple[complex, float, complex, float]:
+    """Pick a start point on a contour intentionally close to an anchor eigenvalue.
+
+    This is intended for inference/demo visualization: contours very far from the
+    spectrum often look almost circular and are less informative.
+    """
+
+    A = np.asarray(A, dtype=np.complex128)
+    eigvals = np.linalg.eigvals(A)
+    center = complex(select_anchor_eigenvalue(A, which=which))
+    matrix_scale = max(_matrix_scale(A), 1.0)
+    nearest_gap = _nearest_eigen_gap(eigvals, center)
+
+    if np.isfinite(nearest_gap):
+        target_radius = float(max(gap_ratio, 1e-4) * nearest_gap)
+    else:
+        target_radius = float(max(fallback_radius_ratio, 1e-4) * matrix_scale)
+
+    min_radius = float(max(min_radius_ratio, 1e-8) * matrix_scale)
+    max_radius = float(max(0.25 * matrix_scale, min_radius))
+    target_radius = float(np.clip(target_radius, min_radius, max_radius))
+
+    base_direction = {
+        "rightmost": 1.0 + 0.0j,
+        "leftmost": -1.0 + 0.0j,
+        "topmost": 0.0 + 1.0j,
+        "bottommost": 0.0 - 1.0j,
+    }[which]
+    direction = base_direction * np.exp(1j * angle_offset)
+
+    epsilon_floor = float(max(epsilon_floor_ratio, 1e-12) * matrix_scale)
+    z0 = center + target_radius * direction
+    epsilon = float(sigma_min_at(A, z0))
+
+    expansions = 0
+    while (not np.isfinite(epsilon) or epsilon <= epsilon_floor) and expansions < 8:
+        target_radius = float(min(target_radius * 1.8, max_radius))
+        z0 = center + target_radius * direction
+        epsilon = float(sigma_min_at(A, z0))
+        expansions += 1
+        if target_radius >= max_radius - 1e-15:
+            break
+
+    return complex(z0), float(epsilon), center, float(target_radius)
 
 
 def project_to_contour(

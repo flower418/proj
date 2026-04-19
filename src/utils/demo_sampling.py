@@ -104,14 +104,32 @@ def build_random_matrix(n: int, rng: np.random.Generator) -> tuple[str, np.ndarr
     return matrix_type, np.asarray(matrix, dtype=np.complex128)
 
 
+def _matrix_scale(A: np.ndarray) -> float:
+    A = np.asarray(A, dtype=np.complex128)
+    n = max(int(A.shape[0]), 1)
+    return float(np.linalg.norm(A, ord="fro") / max(np.sqrt(float(n)), 1.0))
+
+
+def _nearest_eigen_gap(eigvals: np.ndarray, anchor: complex) -> float:
+    distances = np.abs(np.asarray(eigvals, dtype=np.complex128) - complex(anchor))
+    valid = distances > 1e-10
+    if not np.any(valid):
+        return float("inf")
+    return float(np.min(distances[valid]))
+
+
 def sample_unrestricted_random_point(
     A: np.ndarray,
     rng: np.random.Generator,
+    radius_range: tuple[float, float] = (0.25, 1.25),
 ) -> tuple[complex, complex]:
     eigvals = np.linalg.eigvals(np.asarray(A, dtype=np.complex128))
     center = complex(np.mean(eigvals))
     spectral_scale = max(np.ptp(np.real(eigvals)), np.ptp(np.imag(eigvals)), 1.0)
-    z_random = center + spectral_scale * (rng.standard_normal() + 1j * rng.standard_normal())
+    low, high = radius_range
+    radius = float(rng.uniform(low, high)) * spectral_scale
+    angle = float(rng.uniform(0.0, 2.0 * np.pi))
+    z_random = center + radius * np.exp(1j * angle)
     anchor = complex(eigvals[int(np.argmin(np.abs(eigvals - z_random)))])
     return complex(z_random), anchor
 
@@ -123,3 +141,65 @@ def sample_random_contour_start(
     z_random, anchor = sample_unrestricted_random_point(A=A, rng=rng)
     epsilon = float(sigma_min_at(A, z_random))
     return complex(z_random), epsilon, complex(z_random), complex(anchor)
+
+
+def sample_near_eigen_contour_start(
+    A: np.ndarray,
+    rng: np.random.Generator,
+    gap_ratio_range: tuple[float, float] = (0.06, 0.22),
+    fallback_radius_ratio_range: tuple[float, float] = (0.02, 0.12),
+    min_radius_ratio: float = 1e-4,
+    max_radius_ratio: float = 0.25,
+    epsilon_floor_ratio: float = 1e-8,
+) -> tuple[complex, float, complex, complex, dict]:
+    A = np.asarray(A, dtype=np.complex128)
+    eigvals = np.linalg.eigvals(A)
+    anchor = complex(eigvals[int(rng.integers(len(eigvals)))])
+    nearest_gap = _nearest_eigen_gap(eigvals, anchor)
+    matrix_scale = max(_matrix_scale(A), 1.0)
+
+    if np.isfinite(nearest_gap):
+        low, high = gap_ratio_range
+        radius = float(rng.uniform(low, high)) * nearest_gap
+    else:
+        low, high = fallback_radius_ratio_range
+        radius = float(rng.uniform(low, high)) * matrix_scale
+
+    min_radius = float(max(min_radius_ratio, 1e-8) * matrix_scale)
+    max_radius = float(max(max_radius_ratio * matrix_scale, min_radius))
+    radius = float(np.clip(radius, min_radius, max_radius))
+    angle = float(rng.uniform(0.0, 2.0 * np.pi))
+    direction = np.exp(1j * angle)
+    z_random = complex(anchor + radius * direction)
+    epsilon_floor = float(max(epsilon_floor_ratio, 1e-12) * matrix_scale)
+    epsilon = float(sigma_min_at(A, z_random))
+
+    expansions = 0
+    while (not np.isfinite(epsilon) or epsilon <= epsilon_floor) and expansions < 8:
+        radius = float(min(radius * 1.6, max_radius))
+        z_random = complex(anchor + radius * direction)
+        epsilon = float(sigma_min_at(A, z_random))
+        expansions += 1
+        if radius >= max_radius - 1e-15:
+            break
+
+    return z_random, epsilon, z_random, anchor, {
+        "sampling_mode": "near_eigen",
+        "sampling_radius": float(radius),
+    }
+
+
+def sample_training_contour_start(
+    A: np.ndarray,
+    rng: np.random.Generator,
+    near_eigen_ratio: float = 0.75,
+) -> tuple[complex, float, complex, complex, dict]:
+    near_eigen_ratio = float(np.clip(near_eigen_ratio, 0.0, 1.0))
+    if float(rng.random()) < near_eigen_ratio:
+        return sample_near_eigen_contour_start(A=A, rng=rng)
+
+    z0, epsilon, z_random, anchor = sample_random_contour_start(A=A, rng=rng)
+    return z0, epsilon, z_random, anchor, {
+        "sampling_mode": "random_point",
+        "sampling_radius": float("nan"),
+    }
