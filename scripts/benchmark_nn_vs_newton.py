@@ -78,6 +78,7 @@ def summarize_tracker_result(result: dict) -> dict:
     closure_error = float(abs(trajectory[-1] - trajectory[0])) if len(trajectory) >= 2 else 0.0
     return {
         "closed": bool(result.get("closed", False)),
+        "failure_reason": result.get("failure_reason"),
         "tracked_points": int(len(trajectory)),
         "closure_error": closure_error,
         "path_length": float(result.get("path_length", 0.0)),

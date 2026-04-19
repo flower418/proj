@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from .contour_init import select_anchor_eigenvalue, sigma_min_at
+from .svd import smallest_singular_triplet
 
 
 SUPPORTED_MATRIX_TYPES = (
@@ -189,7 +190,9 @@ def sample_near_eigen_contour_start(
     fallback_radius_ratio_range: tuple[float, float] = (0.02, 0.12),
     min_radius_ratio: float = 1e-4,
     max_radius_ratio: float = 0.25,
-    epsilon_floor_ratio: float = 1e-8,
+    epsilon_floor_ratio: float = 1e-6,
+    overlap_floor: float = 1.0e-8,
+    max_direction_attempts: int = 12,
 ) -> tuple[complex, float, complex, complex, dict]:
     A = np.asarray(A, dtype=np.complex128)
     eigvals = np.linalg.eigvals(A)
@@ -202,36 +205,69 @@ def sample_near_eigen_contour_start(
     nearest_gap = _nearest_eigen_gap(eigvals, anchor)
     matrix_scale = max(_matrix_scale(A), 1.0)
 
-    if np.isfinite(nearest_gap):
-        low, high = gap_ratio_range
-        radius = float(rng.uniform(low, high)) * nearest_gap
-    else:
-        low, high = fallback_radius_ratio_range
-        radius = float(rng.uniform(low, high)) * matrix_scale
-
     min_radius = float(max(min_radius_ratio, 1e-8) * matrix_scale)
     max_radius = float(max(max_radius_ratio * matrix_scale, min_radius))
-    radius = float(np.clip(radius, min_radius, max_radius))
-    angle = float(rng.uniform(0.0, 2.0 * np.pi))
-    direction = np.exp(1j * angle)
-    z_random = complex(anchor + radius * direction)
     epsilon_floor = float(max(epsilon_floor_ratio, 1e-12) * matrix_scale)
-    epsilon = float(sigma_min_at(A, z_random))
+    best_candidate = None
 
-    expansions = 0
-    while (not np.isfinite(epsilon) or epsilon <= epsilon_floor) and expansions < 8:
-        radius = float(min(radius * 1.6, max_radius))
-        z_random = complex(anchor + radius * direction)
-        epsilon = float(sigma_min_at(A, z_random))
-        expansions += 1
-        if radius >= max_radius - 1e-15:
-            break
+    for _ in range(max(int(max_direction_attempts), 1)):
+        if np.isfinite(nearest_gap):
+            low, high = gap_ratio_range
+            radius = float(rng.uniform(low, high)) * nearest_gap
+        else:
+            low, high = fallback_radius_ratio_range
+            radius = float(rng.uniform(low, high)) * matrix_scale
 
-    return z_random, epsilon, z_random, anchor, {
-        "sampling_mode": "near_eigen",
-        "sampling_radius": float(radius),
-        "sampling_angle": float(angle),
+        radius = float(np.clip(radius, min_radius, max_radius))
+        angle = float(rng.uniform(0.0, 2.0 * np.pi))
+        direction = np.exp(1j * angle)
+        expansions = 0
+
+        while True:
+            z_random = complex(anchor + radius * direction)
+            epsilon, u, v = smallest_singular_triplet(A, z_random)
+            epsilon = float(epsilon)
+            overlap = float(abs(np.vdot(v, u)))
+
+            candidate = {
+                "z": complex(z_random),
+                "epsilon": epsilon,
+                "radius": float(radius),
+                "angle": float(angle),
+                "overlap": overlap,
+            }
+            if best_candidate is None:
+                best_candidate = candidate
+            else:
+                best_score = min(float(best_candidate["epsilon"]), epsilon_floor) + 0.1 * float(best_candidate["overlap"])
+                current_score = min(epsilon, epsilon_floor) + 0.1 * overlap
+                if current_score > best_score:
+                    best_candidate = candidate
+
+            if np.isfinite(epsilon) and epsilon > epsilon_floor and overlap >= overlap_floor:
+                return z_random, epsilon, z_random, anchor, {
+                    "sampling_mode": "near_eigen",
+                    "sampling_radius": float(radius),
+                    "sampling_angle": float(angle),
+                    "anchor_mode": anchor_mode,
+                    "triplet_overlap": overlap,
+                }
+
+            if radius >= max_radius - 1e-15 or expansions >= 8:
+                break
+
+            radius = float(min(radius * 1.6, max_radius))
+            expansions += 1
+
+    if best_candidate is None:
+        raise RuntimeError("Unable to sample a near-eigen contour start.")
+
+    return best_candidate["z"], float(best_candidate["epsilon"]), best_candidate["z"], anchor, {
+        "sampling_mode": "near_eigen_relaxed",
+        "sampling_radius": float(best_candidate["radius"]),
+        "sampling_angle": float(best_candidate["angle"]),
         "anchor_mode": anchor_mode,
+        "triplet_overlap": float(best_candidate["overlap"]),
     }
 
 

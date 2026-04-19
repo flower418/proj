@@ -9,7 +9,6 @@ from src.nn.features import assemble_controller_features, extract_features
 from src.utils.contour_init import project_to_contour, sigma_min_at
 from src.utils.local_projection import project_to_contour_by_local_normal
 from src.utils.svd import smallest_singular_triplet
-from src.utils.tangent import estimate_tangent_from_sigma_field
 
 
 @dataclass
@@ -21,6 +20,8 @@ class TrackerState:
 
 
 class ContourTracker:
+    TANGENT_OVERLAP_TOL = 1.0e-10
+
     def __init__(
         self,
         A: np.ndarray,
@@ -65,6 +66,27 @@ class ContourTracker:
         _, u, v = self.svd_solver(self.A, z)
         return z, u, v
 
+    @staticmethod
+    def _normalize_vector(vector: np.ndarray) -> np.ndarray:
+        return np.asarray(vector, dtype=np.complex128) / max(np.linalg.norm(vector), 1e-15)
+
+    def _refresh_normalized_triplet(self, z: complex) -> tuple[np.ndarray, np.ndarray]:
+        _, u, v = self.refresh_triplet(z)
+        return self._normalize_vector(u), self._normalize_vector(v)
+
+    def _ensure_well_defined_tangent_state(
+        self,
+        z: complex,
+        u: np.ndarray,
+        v: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if abs(np.vdot(v, u)) >= self.TANGENT_OVERLAP_TOL:
+            return self._normalize_vector(u), self._normalize_vector(v)
+        u_exact, v_exact = self._refresh_normalized_triplet(z)
+        if abs(np.vdot(v_exact, u_exact)) < self.TANGENT_OVERLAP_TOL:
+            raise ValueError('v^*u is too small; contour tangent is ill-defined.')
+        return u_exact, v_exact
+
     def _compute_tangent_direction(
         self,
         u: np.ndarray,
@@ -81,14 +103,7 @@ class ContourTracker:
                 if float(np.real(np.conj(preferred) * tangent)) < 0.0:
                     tangent = -tangent
             return tangent
-        if z is None:
-            raise ValueError('v^*u is too small; contour tangent is ill-defined.')
-        return estimate_tangent_from_sigma_field(
-            self.A,
-            z,
-            self.epsilon,
-            preferred_direction=preferred_direction,
-        )
+        raise ValueError('v^*u is too small; contour tangent is ill-defined.')
 
     def extract_state_features(self, z, u, v, prev_state=None) -> np.ndarray:
         base_features = extract_features(
@@ -191,13 +206,14 @@ class ContourTracker:
         ds: float,
         preferred_tangent: complex | None = None,
     ) -> tuple[complex, np.ndarray, np.ndarray]:
+        u_step, v_step = self._ensure_well_defined_tangent_state(z, u, v)
         dz_ds = self._compute_tangent_direction(
-            u,
-            v,
+            u_step,
+            v_step,
             z=z,
             preferred_direction=preferred_tangent,
         )
-        return z + ds * dz_ds, u.copy(), v.copy()
+        return z + ds * dz_ds, u_step.copy(), v_step.copy()
 
     def _approximate_triplet_metrics(
         self,
@@ -453,13 +469,30 @@ class ContourTracker:
         projection_indices = []
         deferred_projection_streak = 0
         steps_since_exact_triplet_refresh = 0
+        failure_reason = None
         try:
+            u, v = self._ensure_well_defined_tangent_state(z0, u, v)
+            state = TrackerState(
+                z=z0,
+                u=u,
+                v=v,
+                prev_ds=0.0,
+            )
+            u_history[0] = u.copy()
+            v_history[0] = v.copy()
             prev_tangent = self._compute_tangent_direction(u, v, z=z0)
         except Exception:
             prev_tangent = None
 
         for step in range(max_steps):
             z_prev = state.z
+            try:
+                state.u, state.v = self._ensure_well_defined_tangent_state(state.z, state.u, state.v)
+                u_history[-1] = state.u.copy()
+                v_history[-1] = state.v.copy()
+            except ValueError:
+                failure_reason = 'ill_defined_tangent'
+                break
             features = self.extract_state_features(state.z, state.u, state.v, prev_state=state)
             if self.controller is not None:
                 if hasattr(self.controller, 'predict_with_info'):
@@ -474,15 +507,19 @@ class ContourTracker:
             raw_ds = max(float(ds), 1e-12)
             ds = max(raw_ds, self.min_step_size)
 
-            z, u, v, accepted_ds, step_diagnostics = self._advance_step(
-                state.z,
-                state.u,
-                state.v,
-                ds=ds,
-                deferred_projection_streak=deferred_projection_streak,
-                steps_since_exact_triplet_refresh=steps_since_exact_triplet_refresh,
-                preferred_tangent=prev_tangent,
-            )
+            try:
+                z, u, v, accepted_ds, step_diagnostics = self._advance_step(
+                    state.z,
+                    state.u,
+                    state.v,
+                    ds=ds,
+                    deferred_projection_streak=deferred_projection_streak,
+                    steps_since_exact_triplet_refresh=steps_since_exact_triplet_refresh,
+                    preferred_tangent=prev_tangent,
+                )
+            except ValueError:
+                failure_reason = 'ill_defined_tangent'
+                break
             sigma_after_correction = float(step_diagnostics['sigma'])
             sigma_error_after_correction = float(step_diagnostics['sigma_error'])
             raw_sigma = float(step_diagnostics.get('raw_sigma', sigma_after_correction))
@@ -612,4 +649,5 @@ class ContourTracker:
             'closure_anchor': closure_anchor,
             'projection_indices': projection_indices,
             'sigma_at_start': float(sigma_at_start),
+            'failure_reason': failure_reason,
         }

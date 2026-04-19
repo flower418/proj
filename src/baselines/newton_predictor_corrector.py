@@ -6,7 +6,6 @@ import numpy as np
 
 from src.utils.contour_init import project_to_contour, sigma_min_at
 from src.utils.svd import smallest_singular_triplet
-from src.utils.tangent import estimate_tangent_from_sigma_field
 
 
 @dataclass
@@ -22,6 +21,8 @@ class NewtonCorrectorResult:
 
 class NewtonPredictorCorrectorTracker:
     """Classic tangent predictor plus Newton normal corrector baseline."""
+
+    TANGENT_OVERLAP_TOL = 1.0e-10
 
     def __init__(
         self,
@@ -100,6 +101,25 @@ class NewtonPredictorCorrectorTracker:
         v0 = v0 / max(np.linalg.norm(v0), 1e-15)
         return z0, u0, v0, float(sigma0)
 
+    def _refresh_normalized_triplet(self, z: complex) -> tuple[np.ndarray, np.ndarray]:
+        _, u, v = self.svd_solver(self.A, z)
+        u = u / max(np.linalg.norm(u), 1e-15)
+        v = v / max(np.linalg.norm(v), 1e-15)
+        return u, v
+
+    def _ensure_well_defined_tangent_state(
+        self,
+        z: complex,
+        u: np.ndarray,
+        v: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if abs(np.vdot(v, u)) >= self.TANGENT_OVERLAP_TOL:
+            return u, v
+        u_exact, v_exact = self._refresh_normalized_triplet(z)
+        if abs(np.vdot(v_exact, u_exact)) < self.TANGENT_OVERLAP_TOL:
+            raise ValueError("v^*u is too small; contour tangent is ill-defined.")
+        return u_exact, v_exact
+
     def _tangent_direction(
         self,
         z: complex,
@@ -116,12 +136,7 @@ class NewtonPredictorCorrectorTracker:
                 if float(np.real(np.conj(preferred) * tangent)) < 0.0:
                     tangent = -tangent
             return tangent
-        return estimate_tangent_from_sigma_field(
-            self.A,
-            z,
-            self.epsilon,
-            preferred_direction=preferred_direction,
-        )
+        raise ValueError("v^*u is too small; contour tangent is ill-defined.")
 
     def _newton_correct(
         self,
@@ -217,11 +232,21 @@ class NewtonPredictorCorrectorTracker:
         step_size = self.initial_step_size
         failure_reason = None
         try:
+            u, v = self._ensure_well_defined_tangent_state(z, u, v)
+            u_history[0] = u.copy()
+            v_history[0] = v.copy()
             prev_tangent = self._tangent_direction(z, u, v)
         except Exception:
             prev_tangent = None
 
         for step in range(max_steps):
+            try:
+                u, v = self._ensure_well_defined_tangent_state(z, u, v)
+                u_history[-1] = u.copy()
+                v_history[-1] = v.copy()
+            except ValueError:
+                failure_reason = "ill_defined_tangent"
+                break
             tangent = self._tangent_direction(z, u, v, preferred_direction=prev_tangent)
             accepted = None
             accepted_step = None
